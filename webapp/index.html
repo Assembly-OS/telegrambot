@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>ASSAMBLEYA AI OS</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #ffffff);
+      --secbg: var(--tg-theme-secondary-bg-color, #f2f3f5);
+      --text: var(--tg-theme-text-color, #16181c);
+      --hint: var(--tg-theme-hint-color, #8b929c);
+      --link: var(--tg-theme-link-color, #2f7fe0);
+      --btn: var(--tg-theme-button-color, #2f7fe0);
+      --btn-text: var(--tg-theme-button-text-color, #ffffff);
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--secbg); color: var(--text);
+      padding: 0 0 40px; font-size: 15px; line-height: 1.4;
+    }
+    header {
+      position: sticky; top: 0; z-index: 5;
+      background: var(--bg); padding: 14px 16px;
+      border-bottom: 1px solid rgba(128,128,128,.15);
+    }
+    header .app-name { font-weight: 700; font-size: 16px; }
+    header .who { color: var(--hint); font-size: 13px; margin-top: 2px; }
+    .badge {
+      display: inline-block; font-size: 11px; font-weight: 600;
+      padding: 2px 8px; border-radius: 20px; margin-left: 6px;
+      background: var(--btn); color: var(--btn-text); vertical-align: middle;
+    }
+    main { padding: 14px 16px; max-width: 640px; margin: 0 auto; }
+    h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em;
+         color: var(--hint); margin: 18px 2px 8px; }
+    .card {
+      background: var(--bg); border-radius: var(--radius);
+      padding: 13px 14px; margin-bottom: 10px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.05);
+    }
+    .card .t-title { font-weight: 600; margin-bottom: 6px; }
+    .card .t-meta { color: var(--hint); font-size: 13px; display: flex;
+                    flex-wrap: wrap; gap: 4px 12px; margin-bottom: 2px; }
+    .pill { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 20px; }
+    .pill.progress { background: rgba(240,170,20,.16); color: #d98a00; }
+    .pill.done { background: rgba(40,170,90,.16); color: #22a05a; }
+    label { display: block; font-size: 13px; color: var(--hint); margin: 10px 2px 4px; }
+    input, select {
+      width: 100%; padding: 11px 12px; font-size: 15px; color: var(--text);
+      background: var(--secbg); border: 1px solid transparent; border-radius: 10px;
+      outline: none; appearance: none;
+    }
+    input:focus, select:focus { border-color: var(--link); }
+    button {
+      border: none; border-radius: 10px; font-size: 15px; font-weight: 600;
+      padding: 11px 14px; cursor: pointer;
+    }
+    .btn-primary { background: var(--btn); color: var(--btn-text); width: 100%; margin-top: 16px; }
+    .btn-done { background: rgba(40,170,90,.15); color: #22a05a; margin-top: 10px; width: 100%; }
+    .btn-del { background: rgba(217,68,63,.12); color: #d9443f; margin-top: 8px; width: 100%; }
+    .btn-primary:disabled { opacity: .5; }
+    .center { text-align: center; color: var(--hint); padding: 40px 20px; }
+    .toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+      background: #22a05a; color: #fff; padding: 10px 18px; border-radius: 24px;
+      font-size: 14px; font-weight: 600; opacity: 0; transition: opacity .2s;
+      pointer-events: none; z-index: 20; max-width: 90%;
+    }
+    .toast.show { opacity: 1; }
+    .toast.err { background: #d9443f; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="app-name">🏛 ASSAMBLEYA AI OS</div>
+    <div class="who" id="who"></div>
+  </header>
+  <main id="root">
+    <div class="center" id="loader">…</div>
+  </main>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp;
+    const params = new URLSearchParams(location.search);
+
+    const I18N = {
+      ru: {
+        my_tasks: "Мои задания", all_tasks: "Все задания", new_task: "Новое задание",
+        title_label: "Суть задания", direction_label: "Направление", project_label: "Проект",
+        no_project: "Без проекта", assignee_label: "Ответственный", deadline_label: "Срок (дедлайн)",
+        create_btn: "Создать задание", done_btn: "Отметить выполненным",
+        delete_btn: "Удалить", confirm_delete: "Удалить это задание? Действие необратимо.",
+        deleted_ok: "Задание удалено 🗑",
+        no_tasks: "Заданий пока нет", assigned_to: "Ответственный",
+        role_admin: "Админ", role_worker: "Работник",
+        open_from_tg: "Откройте это приложение из Telegram — через кнопку бота.",
+        created_ok: "Задание создано ✅", done_ok: "Выполнено ✅",
+        err: "Ошибка", fill_all: "Заполните все поля", select_ph: "— выберите —",
+        deadline_ph: "напр. 25.12.2026"
+      },
+      uz: {
+        my_tasks: "Topshiriqlarim", all_tasks: "Barcha topshiriqlar", new_task: "Yangi topshiriq",
+        title_label: "Topshiriq mazmuni", direction_label: "Yo'nalish", project_label: "Loyiha",
+        no_project: "Loyihasiz", assignee_label: "Mas'ul", deadline_label: "Muddat (dedlayn)",
+        create_btn: "Topshiriq yaratish", done_btn: "Bajarildi deb belgilash",
+        delete_btn: "O'chirish", confirm_delete: "Ushbu topshiriq o'chirilsinmi? Amalni qaytarib bo'lmaydi.",
+        deleted_ok: "Topshiriq o'chirildi 🗑",
+        no_tasks: "Hozircha topshiriq yo'q", assigned_to: "Mas'ul",
+        role_admin: "Admin", role_worker: "Xodim",
+        open_from_tg: "Ushbu ilovani Telegram orqali — bot tugmasidan oching.",
+        created_ok: "Topshiriq yaratildi ✅", done_ok: "Bajarildi ✅",
+        err: "Xatolik", fill_all: "Barcha maydonlarni to'ldiring", select_ph: "— tanlang —",
+        deadline_ph: "masalan 25.12.2026"
+      },
+      en: {
+        my_tasks: "My tasks", all_tasks: "All tasks", new_task: "New task",
+        title_label: "Task description", direction_label: "Direction", project_label: "Project",
+        no_project: "No project", assignee_label: "Assignee", deadline_label: "Deadline",
+        create_btn: "Create task", done_btn: "Mark as completed",
+        delete_btn: "Delete", confirm_delete: "Delete this task? This cannot be undone.",
+        deleted_ok: "Task deleted 🗑",
+        no_tasks: "No tasks yet", assigned_to: "Assignee",
+        role_admin: "Admin", role_worker: "Worker",
+        open_from_tg: "Open this app from Telegram — via the bot button.",
+        created_ok: "Task created ✅", done_ok: "Completed ✅",
+        err: "Error", fill_all: "Fill in all fields", select_ph: "— select —",
+        deadline_ph: "e.g. 2026-12-25"
+      }
+    };
+
+    let LANG = (params.get("lang") in I18N) ? params.get("lang") : null;
+    let T = I18N.ru;
+    let STATE = { me: null, tasks: [], users: [], directions: [], projects: [] };
+
+    const $ = (sel, el = document) => el.querySelector(sel);
+    function esc(s) { const d = document.createElement("div"); d.textContent = (s == null ? "" : String(s)); return d.innerHTML; }
+
+    function toast(msg, isErr) {
+      const el = $("#toast");
+      el.textContent = msg; el.className = "toast show" + (isErr ? " err" : "");
+      setTimeout(() => { el.className = "toast"; }, 2200);
+    }
+
+    async function api(path, opts = {}) {
+      const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+      if (tg && tg.initData) headers["X-Init-Data"] = tg.initData;
+      const res = await fetch(path, Object.assign({}, opts, { headers }));
+      if (!res.ok) {
+        let msg = "HTTP " + res.status;
+        try { msg = (await res.json()).error || msg; } catch (_) {}
+        throw new Error(msg);
+      }
+      return res.json();
+    }
+
+    function statusPill(task) {
+      const cls = task.is_done ? "done" : "progress";
+      return `<span class="pill ${cls}">${esc(task.status_label)}</span>`;
+    }
+
+    function taskCard(task, showAssignee) {
+      const isAdmin = STATE.me && STATE.me.role === "admin";
+      const dir = task.direction_code || "—";
+      const assignee = showAssignee
+        ? `<span>👤 ${esc(task.assignee_name || "—")}</span>` : "";
+      const doneBtn = task.is_done ? "" :
+        `<button class="btn-done" data-done="${task.id}">✅ ${esc(T.done_btn)}</button>`;
+      const delBtn = isAdmin
+        ? `<button class="btn-del" data-del="${task.id}">🗑 ${esc(T.delete_btn)}</button>` : "";
+      return `
+        <div class="card">
+          <div class="t-title">#${task.id} · ${esc(task.title)}</div>
+          <div class="t-meta">
+            <span>🏛 ${esc(dir)}</span>
+            <span>⏰ ${esc(task.deadline)}</span>
+            ${assignee}
+          </div>
+          <div class="t-meta">${statusPill(task)}</div>
+          ${doneBtn}
+          ${delBtn}
+        </div>`;
+    }
+
+    function renderWorker() {
+      const items = STATE.tasks.length
+        ? STATE.tasks.map(t => taskCard(t, false)).join("")
+        : `<div class="center">${esc(T.no_tasks)}</div>`;
+      $("#root").innerHTML = `<h2>${esc(T.my_tasks)}</h2>${items}`;
+      bindDone();
+    }
+
+    function renderAdmin() {
+      const dirOpts = STATE.directions
+        .map(d => `<option value="${esc(d.code)}">${esc(d.code)} — ${esc(d.name)}</option>`).join("");
+      const projOpts = `<option value="none">${esc(T.no_project)}</option>` +
+        STATE.projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
+      const userOpts = `<option value="" disabled selected>${esc(T.select_ph)}</option>` +
+        STATE.users.map(u => `<option value="${u.id}">${esc(u.name)} · ${esc(T["role_" + u.role] || u.role)}</option>`).join("");
+
+      const list = STATE.tasks.length
+        ? STATE.tasks.map(t => taskCard(t, true)).join("")
+        : `<div class="center">${esc(T.no_tasks)}</div>`;
+
+      $("#root").innerHTML = `
+        <h2>${esc(T.new_task)}</h2>
+        <div class="card">
+          <label>${esc(T.title_label)}</label>
+          <input id="f-title" type="text" />
+          <label>${esc(T.direction_label)}</label>
+          <select id="f-dir">${dirOpts}</select>
+          <label>${esc(T.project_label)}</label>
+          <select id="f-proj">${projOpts}</select>
+          <label>${esc(T.assignee_label)}</label>
+          <select id="f-assignee">${userOpts}</select>
+          <label>${esc(T.deadline_label)}</label>
+          <input id="f-deadline" type="text" placeholder="${esc(T.deadline_ph)}" />
+          <button class="btn-primary" id="f-create">➕ ${esc(T.create_btn)}</button>
+        </div>
+        <h2>${esc(T.all_tasks)}</h2>
+        ${list}`;
+
+      $("#f-create").addEventListener("click", createTask);
+      bindDone();
+      bindDelete();
+    }
+
+    function bindDone() {
+      document.querySelectorAll("[data-done]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          try {
+            await api(`/api/tasks/${btn.dataset.done}/done`, { method: "POST" });
+            const task = STATE.tasks.find(t => String(t.id) === btn.dataset.done);
+            if (task) { task.status = "done"; task.is_done = true; task.status_label = T.done_ok.replace(" ✅",""); }
+            toast(T.done_ok);
+            STATE.me.role === "admin" ? renderAdmin() : renderWorker();
+          } catch (e) { toast(T.err + ": " + e.message, true); btn.disabled = false; }
+        });
+      });
+    }
+
+    function bindDelete() {
+      document.querySelectorAll("[data-del]").forEach(btn => {
+        btn.addEventListener("click", () => deleteTask(btn.dataset.del));
+      });
+    }
+
+    async function deleteTask(id) {
+      const doDelete = async () => {
+        try {
+          await api(`/api/tasks/${id}`, { method: "DELETE" });
+          STATE.tasks = STATE.tasks.filter(t => String(t.id) !== String(id));
+          toast(T.deleted_ok);
+          if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+          renderAdmin();
+        } catch (e) { toast(T.err + ": " + e.message, true); }
+      };
+      if (tg && tg.showConfirm) {
+        tg.showConfirm(T.confirm_delete, (ok) => { if (ok) doDelete(); });
+      } else if (window.confirm(T.confirm_delete)) {
+        doDelete();
+      }
+    }
+
+    async function createTask() {
+      const btn = $("#f-create");
+      const body = {
+        title: $("#f-title").value.trim(),
+        direction: $("#f-dir").value,
+        project_id: $("#f-proj").value,
+        assignee_id: $("#f-assignee").value,
+        deadline: $("#f-deadline").value.trim()
+      };
+      if (!body.title || !body.deadline || !body.assignee_id) { toast(T.fill_all, true); return; }
+      btn.disabled = true;
+      try {
+        const { task } = await api("/api/tasks", { method: "POST", body: JSON.stringify(body) });
+        STATE.tasks.unshift(task);
+        toast(T.created_ok);
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+        renderAdmin();
+      } catch (e) { toast(T.err + ": " + e.message, true); btn.disabled = false; }
+    }
+
+    async function boot() {
+      if (tg) { tg.ready(); tg.expand(); }
+      if (!tg || !tg.initData) {
+        $("#root").innerHTML = `<div class="center">${esc(I18N[LANG || "ru"].open_from_tg)}</div>`;
+        return;
+      }
+      LANG = LANG || (tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.language_code);
+      if (!(LANG in I18N)) LANG = "ru";
+      T = I18N[LANG];
+      try {
+        const data = await api("/api/bootstrap?lang=" + encodeURIComponent(LANG));
+        STATE = Object.assign(STATE, data);
+        if (data.me.lang in I18N) { LANG = data.me.lang; T = I18N[LANG]; }
+        $("#who").innerHTML = esc(STATE.me.name) +
+          `<span class="badge">${esc(T["role_" + STATE.me.role] || STATE.me.role)}</span>`;
+        STATE.me.role === "admin" ? renderAdmin() : renderWorker();
+      } catch (e) {
+        $("#root").innerHTML = `<div class="center">${esc(T.err)}: ${esc(e.message)}</div>`;
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>
