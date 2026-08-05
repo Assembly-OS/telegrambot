@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from urllib.parse import parse_qsl
 
+import aiohttp
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -36,42 +37,50 @@ except ImportError:
     pass
 
 # --- НАСТРОЙКИ ---
-DB_PATH = "assambleya_ai_os.db"
+# Общая база с платформой Assambleya OS (Next.js). Бот и платформа работают с
+# ОДНИМИ пользователями и задачами. По умолчанию — ../data/assambleya.db.
+_DEFAULT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "assambleya.db")
+DB_PATH = os.getenv("PLATFORM_DB", _DEFAULT_DB)
 
 # Токен бота из BotFather. ХРАНИТЕ его в .env, НЕ в коде!
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# Публичный HTTPS-адрес мини-приложения (туннель или домен). Пусто => кнопок приложения нет.
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
-MENU_BUTTON_TEXT = os.getenv("MENU_BUTTON_TEXT", "Platforma")  # Надпись на кнопке-меню
+# Публичный HTTPS-адрес платформы — его открывает кнопка Mini App в Telegram.
+PLATFORM_URL = os.getenv("PLATFORM_URL", os.getenv("WEBAPP_URL", "")).strip()
+WEBAPP_URL = PLATFORM_URL  # совместимость со старыми обращениями
+MENU_BUTTON_TEXT = os.getenv("MENU_BUTTON_TEXT", "Platforma")
 
-# Локальный адрес встроенного веб-сервера Mini App (его наружу выставляет туннель).
+# Локальный адрес платформы — по нему бот проверяет пароль (/link) и её же
+# дёргает контроль-панель. Наружу НЕ выставляется.
+PLATFORM_API = os.getenv("PLATFORM_API", "http://127.0.0.1:3000").rstrip("/")
+
+# Встроенный веб-сервер бота: только вебхук /notify (платформа шлёт сюда
+# уведомления при выдаче задачи), чтобы Telegram-пуш работал и из веб-интерфейса.
 WEBAPP_HOST = os.getenv("WEBAPP_HOST", "127.0.0.1")
 WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080"))
-WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
+NOTIFY_SECRET = os.getenv("BOT_NOTIFY_SECRET", "").strip()
 
 # --- КОНТРОЛЬ ДОСТУПА ---
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "").strip()
 
-# --- СТАТУСЫ ЗАДАЧ (в БД храним коды, текст — в MESSAGES) ---
-STATUS_IN_PROGRESS = "in_progress"
-STATUS_DONE = "done"
+# --- СТАТУСЫ ЗАДАЧ ПЛАТФОРМЫ ---
+STATUS_NEW = "YANGI"          # выдана, ждёт принятия
+STATUS_SUBMITTED = "TEKSHIRUVDA"  # исполнитель сдал на проверку
+STATUS_DONE = "BAJARILDI"     # принято автором
+# «Активные» для исполнителя — всё, что ещё не закрыто и не на проверке.
+ACTIVE_STATUSES = ("YANGI", "QABUL_QILINDI", "BAJARILMOQDA", "QAYTARILDI")
 
-# --- СПРАВОЧНИКИ (используются и в чате, и в мини-приложении) ---
+# --- НАПРАВЛЕНИЯ = ОТДЕЛЫ ПЛАТФОРМЫ ---
 DIRECTIONS = [
-    {"code": "GR", "name": "Government Relations"},
-    {"code": "FR", "name": "Foreign Relations"},
-    {"code": "BR", "name": "Business Relations"},
-    {"code": "PR", "name": "Public Relations"},
-]
-PROJECTS = [
-    {"id": 1, "name": "Central Asian Smart City"},
-    {"id": 2, "name": "Konglomerat"},
-    {"id": 3, "name": "Sokin Osmon"},
+    {"code": "GR", "name": "Davlat aloqalari"},
+    {"code": "FR", "name": "Xalqaro aloqalar"},
+    {"code": "BR", "name": "Biznes aloqalari"},
+    {"code": "PR", "name": "Jamoatchilik aloqalari"},
+    {"code": "AI_LAB", "name": "AI Lab"},
 ]
 DIRECTION_CODES = {d["code"] for d in DIRECTIONS}
-PROJECT_IDS = {p["id"] for p in PROJECTS}
+# Проекты (loyihalar) грузятся из БД платформы функцией get_projects().
 
 logging.basicConfig(level=logging.INFO)
 
@@ -204,15 +213,23 @@ MESSAGES = {
 
 
 def status_label(t: dict, status: str) -> str:
-    return t['status_done'] if status == STATUS_DONE else t['status_in_progress']
+    # Показываем код статуса платформы (YANGI / TEKSHIRUVDA / BAJARILDI …).
+    return status
 
 
-# --- БАЗА ДАННЫХ ---
+# --- БАЗА ДАННЫХ ПЛАТФОРМЫ (общая с Assambleya OS) ---
+# Роли-руководители платформы — им можно выдавать задачи через бота.
+MANAGER_ROLES = {"RAIS", "BOLIM_RAHBARI", "AI_LAB", "UYUSHMA_RAISI", "LOYIHA_RAHBARI"}
+
+
 @contextmanager
 def db_conn():
-    """Единая точка доступа к БД: коммит при успехе, закрытие всегда."""
-    conn = sqlite3.connect(DB_PATH)
+    """Единая точка доступа к общей БД. WAL допускает параллельную работу с
+    Next.js-платформой; busy_timeout ждёт, если писатель занят."""
+    conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
         conn.commit()
@@ -221,153 +238,179 @@ def db_conn():
 
 
 def init_db():
+    """Таблицы создаёт сама платформа; боту нужен лишь столбец связи."""
     with db_conn() as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                full_name TEXT,
-                role TEXT DEFAULT 'worker',
-                lang TEXT DEFAULT 'ru'
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                direction_code TEXT,
-                project_id INTEGER,
-                assignee_name TEXT NOT NULL,
-                assignee_id INTEGER,
-                deadline TEXT NOT NULL,
-                status TEXT DEFAULT 'in_progress',
-                created_by INTEGER
-            )
-        ''')
-
-        # --- Миграции для БД из прошлых версий ---
-        cols = {row['name'] for row in conn.execute("PRAGMA table_info(tasks)")}
-        if 'created_by' not in cols:
-            conn.execute("ALTER TABLE tasks ADD COLUMN created_by INTEGER")
-        if 'assignee_id' not in cols:
-            conn.execute("ALTER TABLE tasks ADD COLUMN assignee_id INTEGER")
-
-        conn.execute(
-            "UPDATE tasks SET status = ? WHERE status IN ('Выполнено', 'Bajarildi', 'Done')",
-            (STATUS_DONE,)
-        )
-        conn.execute(
-            "UPDATE tasks SET status = ? WHERE status NOT IN (?, ?)",
-            (STATUS_IN_PROGRESS, STATUS_IN_PROGRESS, STATUS_DONE)
-        )
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+        if "telegram_id" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN telegram_id INTEGER")
 
 
-def ensure_user(user_id: int, full_name: str):
-    """Создаёт пользователя (или обновляет имя). Первый в системе / из ADMIN_IDS — админ."""
-    forced_admin = user_id in ADMIN_IDS
-    with db_conn() as conn:
-        count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()['c']
-        initial_role = 'admin' if (count == 0 or forced_admin) else 'worker'
-        conn.execute(
-            "INSERT INTO users (user_id, full_name, role, lang) VALUES (?, ?, ?, 'ru') "
-            "ON CONFLICT(user_id) DO UPDATE SET full_name=excluded.full_name",
-            (user_id, full_name, initial_role)
-        )
-        if forced_admin:
-            conn.execute("UPDATE users SET role = 'admin' WHERE user_id = ?", (user_id,))
+def _now():
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 
-def get_user(user_id: int) -> dict:
+def _bot_lang(platform_lang: str) -> str:
+    """Платформа хранит uz/uzc/ru/en; у бота словари ru/uz/en."""
+    v = {"uzc": "uz"}.get(platform_lang, platform_lang)
+    return v if v in MESSAGES else "ru"
+
+
+def link_telegram(tg_id: int, login: str):
+    """Привязывает Telegram-аккаунт к учётке платформы по логину (пароль уже
+    проверен через login-API). Возвращает данные пользователя или None."""
     with db_conn() as conn:
         row = conn.execute(
-            "SELECT role, lang, full_name FROM users WHERE user_id = ?", (user_id,)
+            "SELECT id, full_name, role FROM users WHERE login = ? COLLATE NOCASE AND is_active = 1",
+            (login,),
         ).fetchone()
-    if row:
-        return {'role': row['role'], 'lang': row['lang'], 'full_name': row['full_name'] or ''}
-    return {'role': 'worker', 'lang': 'ru', 'full_name': ''}
+        if not row:
+            return None
+        conn.execute("UPDATE users SET telegram_id = NULL WHERE telegram_id = ?", (tg_id,))
+        conn.execute("UPDATE users SET telegram_id = ? WHERE id = ?", (tg_id, row["id"]))
+        return {"pid": row["id"], "full_name": row["full_name"], "role": row["role"]}
 
 
-def get_worker(user_id: int):
+def get_telegram_id(pid: int):
+    with db_conn() as conn:
+        row = conn.execute("SELECT telegram_id FROM users WHERE id = ?", (pid,)).fetchone()
+    return row["telegram_id"] if row and row["telegram_id"] is not None else None
+
+
+def get_assignables(exclude_pid=None):
+    """Кому можно поставить задачу. Раис задания не получает (он только их
+    раздаёт), автор сам себе тоже не ставит — оба исключаются."""
     with db_conn() as conn:
         return conn.execute(
-            "SELECT user_id, full_name, role FROM users WHERE user_id = ?", (user_id,)
-        ).fetchone()
-
-
-def get_all_users():
-    with db_conn() as conn:
-        return conn.execute(
-            "SELECT user_id, full_name, role FROM users ORDER BY full_name COLLATE NOCASE"
+            "SELECT id, full_name, role, department FROM users "
+            "WHERE is_active = 1 AND role != 'RAIS' AND id IS NOT ? "
+            "ORDER BY full_name COLLATE NOCASE",
+            (exclude_pid,),
         ).fetchall()
 
 
-def set_user_lang(user_id: int, lang: str):
+def get_worker(pid: int):
     with db_conn() as conn:
-        conn.execute("UPDATE users SET lang = ? WHERE user_id = ?", (lang, user_id))
+        return conn.execute(
+            "SELECT id, full_name, role, department, uyushma_id FROM users WHERE id = ?", (pid,)
+        ).fetchone()
 
 
-def set_user_role(user_id: int, role: str):
+def get_projects():
     with db_conn() as conn:
-        conn.execute("UPDATE users SET role = ? WHERE user_id = ?", (role, user_id))
+        return conn.execute("SELECT id, name FROM loyihalar ORDER BY name COLLATE NOCASE").fetchall()
 
 
-def save_task(title, direction_code, project_id, assignee_name, deadline,
-              created_by, assignee_id=None) -> int:
+def get_user(tg_id: int) -> dict:
+    """Пользователь платформы, привязанный к этому Telegram-аккаунту.
+    linked=False, если /link ещё не сделан. role: 'admin' для руководителей."""
     with db_conn() as conn:
-        cursor = conn.execute(
-            "INSERT INTO tasks (title, direction_code, project_id, assignee_name, assignee_id, deadline, status, created_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (title, direction_code, project_id, assignee_name, assignee_id, deadline, STATUS_IN_PROGRESS, created_by)
+        row = conn.execute(
+            "SELECT id, login, full_name, role, department, lang FROM users WHERE telegram_id = ?",
+            (tg_id,),
+        ).fetchone()
+    if not row:
+        return {"linked": False, "role": "worker", "lang": "ru", "full_name": "", "pid": None}
+    is_admin = (row["role"] in MANAGER_ROLES) or (tg_id in ADMIN_IDS)
+    return {
+        "linked": True,
+        "pid": row["id"],
+        "login": row["login"],
+        "full_name": row["full_name"] or "",
+        "role": "admin" if is_admin else "worker",
+        "platform_role": row["role"],
+        "department": row["department"],
+        "lang": _bot_lang(row["lang"]),
+    }
+
+
+def set_user_lang(tg_id: int, lang: str):
+    with db_conn() as conn:
+        conn.execute("UPDATE users SET lang = ? WHERE telegram_id = ?", (lang, tg_id))
+
+
+_TASK_COLS = (
+    "t.id, t.code, t.title, t.to_department AS direction_code, t.loyiha_id AS project_id, "
+    "t.to_user_id AS assignee_id, t.priority, t.deadline, t.status, "
+    "s.full_name AS assignee_name, f.full_name AS author_name"
+)
+_TASK_JOIN = "FROM tasks t JOIN users s ON s.id = t.to_user_id JOIN users f ON f.id = t.from_user_id"
+
+
+def create_task(title, department, loyiha_id, from_pid, to_pid, deadline, priority="ORTA"):
+    """Создаёт задачу платформы (status YANGI) + событие. Возвращает (task_id, code)."""
+    with db_conn() as conn:
+        assignee = conn.execute(
+            "SELECT department, uyushma_id FROM users WHERE id = ?", (to_pid,)
+        ).fetchone()
+        dep = department or (assignee["department"] if assignee else None)
+        n = conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"] + 1
+        code = "T-%04d" % n
+        stamp = _now()
+        cur = conn.execute(
+            "INSERT INTO tasks (code, title, description, from_user_id, to_user_id, to_department, "
+            "priority, status, deadline, loyiha_id, uyushma_id, created_at) "
+            "VALUES (?,?,?,?,?,?,?, 'YANGI', ?,?,?,?)",
+            (code, title, None, from_pid, to_pid, dep, priority, (deadline or None),
+             loyiha_id, (assignee["uyushma_id"] if assignee else None), stamp),
         )
-        return cursor.lastrowid
-
-
-_TASK_COLS = "id, title, direction_code, project_id, assignee_id, assignee_name, deadline, status"
+        task_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO task_events (task_id, user_id, action, comment, created_at) "
+            "VALUES (?,?, 'YARATILDI', 'bot', ?)",
+            (task_id, from_pid, stamp),
+        )
+        return task_id, code
 
 
 def get_all_tasks():
     with db_conn() as conn:
-        return conn.execute(f"SELECT {_TASK_COLS} FROM tasks ORDER BY id DESC").fetchall()
+        return conn.execute(f"SELECT {_TASK_COLS} {_TASK_JOIN} ORDER BY t.id DESC LIMIT 50").fetchall()
 
 
 def get_task(task_id: int):
     with db_conn() as conn:
-        return conn.execute(f"SELECT {_TASK_COLS} FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return conn.execute(f"SELECT {_TASK_COLS} {_TASK_JOIN} WHERE t.id = ?", (task_id,)).fetchone()
 
 
-def get_my_tasks(user_id: int, full_name: str, role: str):
-    """Активные задания «для меня» (используется в чате)."""
+def get_worker_tasks(pid: int):
+    """Активные задачи, назначенные исполнителю (для «Мои задания»)."""
+    marks = ",".join("?" for _ in ACTIVE_STATUSES)
     with db_conn() as conn:
-        if role == 'admin':
-            return conn.execute(
-                f"SELECT {_TASK_COLS} FROM tasks WHERE created_by = ? AND status = ? ORDER BY id DESC",
-                (user_id, STATUS_IN_PROGRESS)
-            ).fetchall()
         return conn.execute(
-            f"SELECT {_TASK_COLS} FROM tasks "
-            "WHERE status = ? AND (assignee_id = ? OR "
-            "(assignee_id IS NULL AND LOWER(TRIM(assignee_name)) = LOWER(TRIM(?)))) ORDER BY id DESC",
-            (STATUS_IN_PROGRESS, user_id, full_name)
+            f"SELECT {_TASK_COLS} {_TASK_JOIN} WHERE t.to_user_id = ? AND t.status IN ({marks}) "
+            "ORDER BY t.id DESC",
+            (pid, *ACTIVE_STATUSES),
         ).fetchall()
 
 
-def get_worker_tasks(user_id: int, full_name: str):
-    """Все задания работника (для мини-приложения): активные — сверху."""
+def get_author_active(pid: int):
+    """Активные задачи, которые выдал этот руководитель (для «Мои задания» админа)."""
     with db_conn() as conn:
         return conn.execute(
-            f"SELECT {_TASK_COLS} FROM tasks "
-            "WHERE assignee_id = ? OR (assignee_id IS NULL AND LOWER(TRIM(assignee_name)) = LOWER(TRIM(?))) "
-            "ORDER BY (status = ?) ASC, id DESC",
-            (user_id, full_name, STATUS_DONE)
+            f"SELECT {_TASK_COLS} {_TASK_JOIN} WHERE t.from_user_id = ? AND t.status != 'BAJARILDI' "
+            "ORDER BY t.id DESC LIMIT 50",
+            (pid,),
         ).fetchall()
 
 
-def set_task_done(task_id: int):
+def submit_task(task_id: int, pid: int):
+    """Исполнитель сдаёт задачу на проверку (-> TEKSHIRUVDA) + событие."""
+    stamp = _now()
     with db_conn() as conn:
-        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (STATUS_DONE, task_id))
+        conn.execute(
+            "UPDATE tasks SET status = ?, submitted_at = ? WHERE id = ?",
+            (STATUS_SUBMITTED, stamp, task_id),
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, user_id, action, comment, created_at) "
+            "VALUES (?,?, 'TOPSHIRILDI', 'bot', ?)",
+            (task_id, pid, stamp),
+        )
 
 
 def delete_task(task_id: int):
     with db_conn() as conn:
+        conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
 
 
@@ -390,13 +433,14 @@ def lang_inline_kb():
     ])
 
 
-def assignee_inline_kb():
-    """Inline-клавиатура со списком всех, кто уже запускал бота (для выбора ответственного)."""
+def assignee_inline_kb(exclude_pid=None):
+    """Inline-клавиатура со списком возможных исполнителей (без Раиса и автора)."""
     rows = []
-    for u in get_all_users():
-        name = u['full_name'] or str(u['user_id'])
-        tag = "👑" if u['role'] == 'admin' else "👷"
-        rows.append([InlineKeyboardButton(text=f"{tag} {name}", callback_data=f"asg_{u['user_id']}")])
+    for u in get_assignables(exclude_pid):
+        name = u['full_name'] or str(u['id'])
+        tag = "👑" if u['role'] in MANAGER_ROLES else "👷"
+        dep = f" · {u['department']}" if u['department'] else ""
+        rows.append([InlineKeyboardButton(text=f"{tag} {name}{dep}", callback_data=f"asg_{u['id']}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -405,7 +449,7 @@ def main_keyboard(lang: str, is_admin: bool):
     keyboard = []
     if is_admin:
         keyboard.append([KeyboardButton(text=t['btn_add_task']), KeyboardButton(text=t['btn_my_tasks'])])
-        keyboard.append([KeyboardButton(text=t['btn_all_tasks']), KeyboardButton(text=t['btn_admin_panel'])])
+        keyboard.append([KeyboardButton(text=t['btn_all_tasks'])])
     else:
         keyboard.append([KeyboardButton(text=t['btn_my_tasks']), KeyboardButton(text=t['btn_profile'])])
 
@@ -420,32 +464,68 @@ def main_keyboard(lang: str, is_admin: bool):
 
 # --- ОБРАБОТКА СТАРТА И СМЕНЫ ЯЗЫКА ---
 
+# --- ПРИВЯЗКА TELEGRAM ↔ УЧЁТКА ПЛАТФОРМЫ ---
+LINK_PROMPT = (
+    "👋 <b>Assambleya OS</b>\n\n"
+    "Чтобы пользоваться ботом, привяжите Telegram к учётной записи платформы:\n"
+    "<code>/link ЛОГИН ПАРОЛЬ</code>\n\n"
+    "Например: <code>/link rais 12345678</code>\n"
+    "Сообщение с паролем бот сразу удаляет."
+)
+LINK_USAGE = "Формат: <code>/link ЛОГИН ПАРОЛЬ</code>\nНапример: <code>/link rais 12345678</code>"
+LINK_FAIL = "⛔ Неверный логин или пароль платформы. Ещё раз: <code>/link ЛОГИН ПАРОЛЬ</code>"
+LINK_NOUSER = "⛔ Учётка не найдена или отключена."
+LINK_OK = "✅ Telegram привязан к <b>{name}</b> (@{login}). Готово — пользуйтесь ботом."
+
+
+async def _verify_platform_login(login: str, password: str) -> bool:
+    """Пароль проверяет сама платформа (её login-API), а не бот."""
+    url = f"{PLATFORM_API}/api/auth/login"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, json={"login": login, "password": password},
+                              timeout=aiohttp.ClientTimeout(total=8)) as r:
+                return r.status == 200
+    except Exception as e:
+        logging.warning("Платформа недоступна для проверки логина (%s): %s", url, e)
+        return False
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    ensure_user(message.from_user.id, message.from_user.full_name)
-    await message.answer(MESSAGES['ru']['choose_lang'], reply_markup=lang_inline_kb(), parse_mode="HTML")
+    u = get_user(message.from_user.id)
+    if not u["linked"]:
+        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        return
+    t = MESSAGES[u["lang"]]
+    role_text = t['role_admin'] if u['role'] == 'admin' else t['role_worker']
+    await message.answer(
+        t['welcome'].format(name=esc(u['full_name'] or message.from_user.full_name), role=role_text),
+        reply_markup=main_keyboard(u['lang'], u['role'] == 'admin'), parse_mode="HTML")
 
 
-@router.message(Command("admin_login"))
-async def make_admin(message: Message, command: CommandObject):
-    user_id = message.from_user.id
-    user_data = get_user(user_id)
-    t = MESSAGES[user_data['lang']]
-
+@router.message(Command("link"))
+async def cmd_link(message: Message, command: CommandObject):
     try:
-        await message.delete()
+        await message.delete()  # прячем пароль из чата
     except Exception:
         pass
-
-    if not ADMIN_SECRET:
-        await message.answer(t['admin_login_disabled'])
+    parts = (command.args or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(LINK_USAGE, parse_mode="HTML")
         return
-    if (command.args or "").strip() != ADMIN_SECRET:
-        await message.answer(t['admin_login_wrong'])
+    login, password = parts[0].strip(), parts[1].strip()
+    if not await _verify_platform_login(login, password):
+        await message.answer(LINK_FAIL, parse_mode="HTML")
         return
-
-    set_user_role(user_id, 'admin')
-    await message.answer(t['admin_granted'], reply_markup=main_keyboard(user_data['lang'], True), parse_mode="HTML")
+    info = link_telegram(message.from_user.id, login)
+    if not info:
+        await message.answer(LINK_NOUSER, parse_mode="HTML")
+        return
+    u = get_user(message.from_user.id)
+    await message.answer(
+        LINK_OK.format(name=esc(info['full_name'] or login), login=esc(login)),
+        reply_markup=main_keyboard(u['lang'], u['role'] == 'admin'), parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("setlang_"))
@@ -477,11 +557,16 @@ async def change_lang_btn(message: Message):
 @router.message(F.text.in_(["⚙️ Админ-панель", "⚙️ Admin panel", "💼 Мой профиль / Должность", "💼 Mening lavozimim", "💼 My Position / Profile"]))
 async def show_profile(message: Message):
     user_data = get_user(message.from_user.id)
+    if not user_data.get('linked'):
+        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        return
     t = MESSAGES[user_data['lang']]
 
-    name = esc(message.from_user.full_name)
+    name = esc(user_data['full_name'] or message.from_user.full_name)
     text = t['admin_profile'].format(name=name) if user_data['role'] == 'admin' else t['worker_profile'].format(name=name)
-    await message.answer(text, parse_mode="HTML")
+    await message.answer(
+        text + f"\n\n👤 <code>@{esc(user_data['login'])}</code> · {esc(user_data['platform_role'])}",
+        parse_mode="HTML")
 
 
 # --- СОЗДАНИЕ ЗАДАНИЯ В ЧАТЕ ---
@@ -489,6 +574,9 @@ async def show_profile(message: Message):
 @router.message(F.text.in_(["➕ Дать задание", "➕ Topshiriq berish", "➕ Assign Task"]))
 async def start_create_task(message: Message, state: FSMContext):
     user_data = get_user(message.from_user.id)
+    if not user_data.get('linked'):
+        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        return
     t = MESSAGES[user_data['lang']]
 
     if user_data['role'] != 'admin':
@@ -523,7 +611,7 @@ async def process_direction(callback, state: FSMContext):
     await state.set_state(CreateTaskFSM.project)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=p['name'], callback_data=f"proj_{p['id']}")] for p in PROJECTS
+        [InlineKeyboardButton(text=p['name'], callback_data=f"proj_{p['id']}")] for p in get_projects()
     ] + [[InlineKeyboardButton(text=t['no_proj'], callback_data="proj_none")]])
     await callback.message.edit_text(t['choose_proj'], reply_markup=kb, parse_mode="HTML")
 
@@ -536,7 +624,11 @@ async def process_project(callback, state: FSMContext):
     proj_val = callback.data.split("_")[1]
     await state.update_data(project_id=None if proj_val == "none" else int(proj_val))
     await state.set_state(CreateTaskFSM.assignee)
-    await callback.message.edit_text(t['choose_assignee'], reply_markup=assignee_inline_kb(), parse_mode="HTML")
+    await callback.message.edit_text(
+        t['choose_assignee'],
+        reply_markup=assignee_inline_kb(user_data['pid']),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(CreateTaskFSM.assignee, F.data.startswith("asg_"))
@@ -546,7 +638,18 @@ async def process_assignee_pick(callback, state: FSMContext):
 
     assignee_id = int(callback.data.split("_")[1])
     worker = get_worker(assignee_id)
-    assignee_name = (worker['full_name'] if worker else None) or str(assignee_id)
+
+    # Защита от устаревшей клавиатуры: Раису задания не ставятся.
+    if not worker or worker['role'] == 'RAIS':
+        await callback.answer()
+        await callback.message.edit_text(
+            t['choose_assignee'],
+            reply_markup=assignee_inline_kb(user_data['pid']),
+            parse_mode="HTML",
+        )
+        return
+
+    assignee_name = worker['full_name'] or str(assignee_id)
 
     await state.update_data(assignee_id=assignee_id, assignee_name=assignee_name)
     await state.set_state(CreateTaskFSM.deadline)
@@ -558,7 +661,7 @@ async def process_assignee_hint(message: Message):
     # Если админ пишет текстом вместо выбора — снова показываем список кнопок.
     user_data = get_user(message.from_user.id)
     t = MESSAGES[user_data['lang']]
-    await message.answer(t['choose_assignee'], reply_markup=assignee_inline_kb(), parse_mode="HTML")
+    await message.answer(t['choose_assignee'], reply_markup=assignee_inline_kb(user_data['pid']), parse_mode="HTML")
 
 
 @router.message(CreateTaskFSM.deadline)
@@ -566,34 +669,37 @@ async def process_deadline(message: Message, state: FSMContext):
     user_data = get_user(message.from_user.id)
     t = MESSAGES[user_data['lang']]
 
+    if not user_data.get('linked'):
+        await state.clear()
+        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        return
+
     await state.update_data(deadline=message.text)
     data = await state.get_data()
-    assignee_id = data.get('assignee_id')
+    assignee_pid = data.get('assignee_id')
 
-    task_id = save_task(
-        data['title'], data['direction'], data['project_id'],
-        data['assignee_name'], data['deadline'],
-        created_by=message.from_user.id, assignee_id=assignee_id
+    task_id, code = create_task(
+        data['title'], data['direction'], data.get('project_id'),
+        from_pid=user_data['pid'], to_pid=assignee_pid, deadline=data['deadline'],
     )
-
     await state.clear()
 
-    # Уведомляем назначенного работника в Telegram.
-    if assignee_id and assignee_id != message.from_user.id:
+    # Уведомляем исполнителя в Telegram (если он привязал аккаунт через /link).
+    tg = get_telegram_id(assignee_pid)
+    if tg and tg != message.from_user.id:
         try:
-            tw = MESSAGES.get(get_user(assignee_id)['lang'], MESSAGES['ru'])
             await bot.send_message(
-                assignee_id,
-                tw['task_assigned'].format(id=task_id, title=esc(data['title']),
-                                           dir=esc(data['direction']), deadline=esc(data['deadline'])),
-                parse_mode="HTML"
-            )
+                tg,
+                MESSAGES['ru']['task_assigned'].format(
+                    id=code, title=esc(data['title']),
+                    dir=esc(data['direction']), deadline=esc(data['deadline'])),
+                parse_mode="HTML")
         except Exception as e:
-            logging.info("Не удалось уведомить работника %s: %s", assignee_id, e)
+            logging.info("Не удалось уведомить исполнителя %s: %s", tg, e)
 
     await message.answer(
         t['task_created'].format(
-            id=task_id, title=esc(data['title']), dir=esc(data['direction']),
+            id=code, title=esc(data['title']), dir=esc(data['direction']),
             assignee=esc(data['assignee_name']), deadline=esc(data['deadline'])
         ),
         reply_markup=main_keyboard(user_data['lang'], user_data['role'] == 'admin'),
@@ -606,6 +712,9 @@ async def process_deadline(message: Message, state: FSMContext):
 @router.message(F.text.in_(["📊 Все поручения", "📊 Barcha topshiriqlar", "📊 All Tasks"]))
 async def show_all_tasks(message: Message):
     user_data = get_user(message.from_user.id)
+    if not user_data.get('linked'):
+        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        return
     t = MESSAGES[user_data['lang']]
 
     if user_data['role'] != 'admin':
@@ -617,38 +726,51 @@ async def show_all_tasks(message: Message):
         await message.answer(t['no_tasks'])
         return
 
-    res = f"📋 <b>{esc(t['btn_all_tasks'])}:</b>\n\n"
+    # Telegram caps a message at 4096 chars, so send the list in chunks
+    # instead of one giant message (which fails with "message is too long").
+    header = f"📋 <b>{esc(t['btn_all_tasks'])}</b> ({len(tasks)}):\n\n"
+    chunk = header
     for row in tasks:
-        res += (
-            f"🔹 <b>#{row['id']} {esc(row['title'])}</b>\n"
-            f"• Direction: {esc(row['direction_code'] or '—')} | Assignee: {esc(row['assignee_name'])}\n"
-            f"• Deadline: <code>{esc(row['deadline'])}</code> | "
-            f"Status: <code>{esc(status_label(t, row['status']))}</code>\n\n"
+        block = (
+            f"🔹 <b>{esc(row['code'])} {esc(row['title'])}</b>\n"
+            f"• {esc(row['direction_code'] or '—')} | → {esc(row['assignee_name'])}\n"
+            f"• <code>{esc(row['deadline'] or '—')}</code> | "
+            f"Status: <code>{esc(row['status'])}</code>\n\n"
         )
-    await message.answer(res, parse_mode="HTML")
+        if len(chunk) + len(block) > 3800:
+            await message.answer(chunk, parse_mode="HTML")
+            chunk = ""
+        chunk += block
+    if chunk.strip():
+        await message.answer(chunk, parse_mode="HTML")
 
 
 @router.message(F.text.in_(["📋 Мои задания", "📋 Mening topshiriqlarim", "📋 My Tasks"]))
 async def show_my_tasks(message: Message):
     user_data = get_user(message.from_user.id)
+    if not user_data.get('linked'):
+        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        return
     t = MESSAGES[user_data['lang']]
 
-    full_name = user_data['full_name'] or message.from_user.full_name
-    tasks = get_my_tasks(message.from_user.id, full_name, user_data['role'])
+    is_admin = user_data['role'] == 'admin'
+    tasks = get_author_active(user_data['pid']) if is_admin else get_worker_tasks(user_data['pid'])
 
     if not tasks:
         await message.answer(t['no_tasks'])
         return
 
     for row in tasks:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
+        # Кнопка «Выполнено» = сдать на проверку — только исполнителю.
+        kb = None if is_admin else InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t['btn_done'], callback_data=f"done_{row['id']}")]
         ])
         await message.answer(
-            f"📌 <b>#{row['id']}: {esc(row['title'])}</b>\n"
-            f"🏛 Direction: {esc(row['direction_code'] or '—')}\n"
-            f"⏰ Deadline: <code>{esc(row['deadline'])}</code> | "
-            f"Status: <code>{esc(status_label(t, row['status']))}</code>",
+            f"📌 <b>{esc(row['code'])}: {esc(row['title'])}</b>\n"
+            f"🏛 {esc(row['direction_code'] or '—')}"
+            + (f"  →  {esc(row['assignee_name'])}" if is_admin else "") + "\n"
+            f"⏰ <code>{esc(row['deadline'] or '—')}</code> | "
+            f"Status: <code>{esc(row['status'])}</code>",
             reply_markup=kb,
             parse_mode="HTML"
         )
@@ -659,290 +781,85 @@ async def mark_done(callback):
     user_data = get_user(callback.from_user.id)
     t = MESSAGES[user_data['lang']]
 
+    if not user_data.get('linked'):
+        await callback.answer()
+        return
     try:
         task_id = int(callback.data.split("_")[1])
     except (IndexError, ValueError):
         await callback.answer()
         return
 
-    set_task_done(task_id)
+    row = get_task(task_id)
+    if not row:
+        await callback.answer()
+        return
+    # Сдать на проверку может только исполнитель задачи.
+    if row['assignee_id'] != user_data['pid']:
+        await callback.answer(t.get('no_access', 'Нет доступа'), show_alert=True)
+        return
+
+    submit_task(task_id, user_data['pid'])
     await callback.answer(t['task_done_msg'])
     base = esc(callback.message.text or "")
-    await callback.message.edit_text(f"{base}\n\n✅ <b>STATUS: DONE</b>", parse_mode="HTML")
+    await callback.message.edit_text(
+        f"{base}\n\n📤 <b>→ TEKSHIRUVDA (на проверке у автора)</b>", parse_mode="HTML")
 
-
-# --- ДАННЫЕ ИЗ МИНИ-ПРИЛОЖЕНИЯ ЧЕРЕЗ sendData (запасной путь) ---
-
-def parse_webapp_payload(raw: str) -> dict:
-    payload = json.loads(raw)
-    if payload.get("action") != "create_task":
-        raise ValueError("unknown action")
-
-    title = str(payload.get("title", "")).strip()
-    direction = str(payload.get("direction", "")).strip().upper()
-    assignee = str(payload.get("assignee", "")).strip()
-    deadline = str(payload.get("deadline", "")).strip()
-
-    project_raw = payload.get("project_id")
-    project_id = None if project_raw in (None, "", "none") else int(project_raw)
-
-    if not title or not assignee or not deadline or direction not in DIRECTION_CODES:
-        raise ValueError("missing fields")
-
-    return {"title": title, "direction": direction, "project_id": project_id,
-            "assignee": assignee, "deadline": deadline}
-
-
-@router.message(F.web_app_data)
-async def handle_webapp_data(message: Message):
-    user_data = get_user(message.from_user.id)
-    t = MESSAGES[user_data['lang']]
-
-    if user_data['role'] != 'admin':
-        await message.answer(t['no_access'])
-        return
-
+    # Уведомим автора задачи, если он привязал Telegram.
     try:
-        task = parse_webapp_payload(message.web_app_data.data)
-    except (ValueError, TypeError, json.JSONDecodeError):
-        await message.answer(t['webapp_error'])
-        return
-
-    task_id = save_task(
-        task['title'], task['direction'], task['project_id'],
-        task['assignee'], task['deadline'], created_by=message.from_user.id
-    )
-    await message.answer(
-        t['task_created'].format(
-            id=task_id, title=esc(task['title']), dir=esc(task['direction']),
-            assignee=esc(task['assignee']), deadline=esc(task['deadline'])
-        ),
-        reply_markup=main_keyboard(user_data['lang'], user_data['role'] == 'admin'),
-        parse_mode="HTML"
-    )
+        with db_conn() as conn:
+            author = conn.execute("SELECT from_user_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        atg = get_telegram_id(author['from_user_id']) if author else None
+        if atg:
+            await bot.send_message(
+                atg, f"📤 <b>{esc(row['code'])}</b>: {esc(row['title'])} — сдано на проверку.",
+                parse_mode="HTML")
+    except Exception as e:
+        logging.info("Не удалось уведомить автора: %s", e)
 
 
-# =========================================================================
-# MINI APP (WebApp) — встроенный веб-сервер + JSON API
-# =========================================================================
+# --- ВЕБХУК УВЕДОМЛЕНИЙ: платформа -> бот ---
+# Платформа при выдаче/смене задачи POST-ит сюда, чтобы Telegram прислал пуш
+# исполнителю/автору. Защищено общим секретом BOT_NOTIFY_SECRET (если задан).
 
-def validate_init_data(init_data: str, max_age_seconds: int = 24 * 3600):
-    """
-    Проверяет подпись Telegram.WebApp.initData (HMAC-SHA256 на основе токена).
-    Возвращает словарь пользователя при валидной подписи, иначе None.
-    Клиент НЕ может подделать, кто он — доверяем только данным отсюда.
-    """
-    if not init_data:
-        return None
-    try:
-        parsed = dict(parse_qsl(init_data, strict_parsing=True))
-    except ValueError:
-        return None
-
-    provided_hash = parsed.pop("hash", None)
-    if not provided_hash:
-        return None
-
-    data_check_string = "\n".join(f"{k}={parsed[k]}" for k in sorted(parsed))
-    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-    computed = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(computed, provided_hash):
-        return None
-
-    auth_date = parsed.get("auth_date", "")
-    if auth_date.isdigit() and (time.time() - int(auth_date)) > max_age_seconds:
-        return None
-
-    try:
-        user = json.loads(parsed.get("user", ""))
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(user, dict) or "id" not in user:
-        return None
-    return user
-
-
-def _tg_full_name(user: dict) -> str:
-    parts = [user.get("first_name"), user.get("last_name")]
-    return " ".join(p for p in parts if p) or str(user.get("id"))
-
-
-def _pick_lang(requested, user, udata) -> str:
-    for candidate in (requested, user.get("language_code"), udata.get("lang")):
-        if candidate in MESSAGES:
-            return candidate
-    return "ru"
-
-
-def task_to_dict(row, lang: str) -> dict:
-    t = MESSAGES[lang]
-    return {
-        "id": row["id"],
-        "title": row["title"],
-        "direction_code": row["direction_code"],
-        "project_id": row["project_id"],
-        "assignee_id": row["assignee_id"],
-        "assignee_name": row["assignee_name"],
-        "deadline": row["deadline"],
-        "status": row["status"],
-        "status_label": status_label(t, row["status"]),
-        "is_done": row["status"] == STATUS_DONE,
-    }
-
-
-def _authed_user(request):
-    return validate_init_data(request.headers.get("X-Init-Data", ""))
-
-
-async def wa_index(request):
-    # no-store — чтобы Telegram не показывал устаревшую версию приложения после правок.
-    return web.FileResponse(
-        os.path.join(WEBAPP_DIR, "index.html"),
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
-    )
-
-
-async def wa_bootstrap(request):
-    tg_user = _authed_user(request)
-    if not tg_user:
-        return web.json_response({"error": "unauthorized"}, status=401)
-
-    uid = int(tg_user["id"])
-    ensure_user(uid, _tg_full_name(tg_user))
-    udata = get_user(uid)
-    lang = _pick_lang(request.rel_url.query.get("lang"), tg_user, udata)
-    is_admin = udata["role"] == "admin"
-
-    if is_admin:
-        tasks = [task_to_dict(r, lang) for r in get_all_tasks()]
-        users = [
-            {"id": r["user_id"], "name": r["full_name"] or str(r["user_id"]), "role": r["role"]}
-            for r in get_all_users()
-        ]
-    else:
-        tasks = [task_to_dict(r, lang) for r in get_worker_tasks(uid, udata["full_name"])]
-        users = []
-
-    return web.json_response({
-        "me": {"id": uid, "name": udata["full_name"] or _tg_full_name(tg_user),
-               "role": udata["role"], "lang": lang},
-        "tasks": tasks,
-        "users": users,
-        "directions": DIRECTIONS,
-        "projects": PROJECTS,
-    })
-
-
-async def wa_create_task(request):
-    tg_user = _authed_user(request)
-    if not tg_user:
-        return web.json_response({"error": "unauthorized"}, status=401)
-
-    uid = int(tg_user["id"])
-    udata = get_user(uid)
-    if udata["role"] != "admin":
+async def wa_notify(request):
+    if NOTIFY_SECRET and request.headers.get("X-Notify-Secret", "") != NOTIFY_SECRET:
         return web.json_response({"error": "forbidden"}, status=403)
-
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
         return web.json_response({"error": "bad_json"}, status=400)
 
-    title = str(body.get("title", "")).strip()
-    direction = str(body.get("direction", "")).strip().upper()
-    deadline = str(body.get("deadline", "")).strip()
+    text = str(body.get("text", "")).strip()
+    tg_id = body.get("telegram_id")
+    to_pid = body.get("to_pid")
+    if not text:
+        return web.json_response({"error": "no_text"}, status=400)
 
-    project_raw = body.get("project_id")
-    project_id = None if project_raw in (None, "", "none") else int(project_raw)
-
-    if not title or not deadline or direction not in DIRECTION_CODES:
-        return web.json_response({"error": "invalid_fields"}, status=400)
-    if project_id is not None and project_id not in PROJECT_IDS:
-        return web.json_response({"error": "invalid_project"}, status=400)
+    if tg_id is None and to_pid is not None:
+        try:
+            tg_id = get_telegram_id(int(to_pid))
+        except (TypeError, ValueError):
+            tg_id = None
+    if not tg_id:
+        return web.json_response({"ok": False, "reason": "not_linked"})
 
     try:
-        assignee_id = int(body.get("assignee_id"))
-    except (TypeError, ValueError):
-        return web.json_response({"error": "invalid_assignee"}, status=400)
-
-    worker = get_worker(assignee_id)
-    if not worker:
-        return web.json_response({"error": "unknown_assignee"}, status=400)
-    assignee_name = worker["full_name"] or str(assignee_id)
-
-    task_id = save_task(title, direction, project_id, assignee_name, deadline,
-                        created_by=uid, assignee_id=assignee_id)
-
-    # Уведомляем работника в Telegram (если он уже открывал бота).
-    try:
-        wl = get_user(assignee_id)["lang"]
-        tw = MESSAGES.get(wl, MESSAGES["ru"])
-        await bot.send_message(
-            assignee_id,
-            tw["task_assigned"].format(id=task_id, title=esc(title), dir=esc(direction), deadline=esc(deadline)),
-            parse_mode="HTML"
-        )
+        await bot.send_message(int(tg_id), text, parse_mode="HTML")
+        return web.json_response({"ok": True})
     except Exception as e:
-        logging.info("Не удалось уведомить работника %s: %s", assignee_id, e)
-
-    return web.json_response({"task": task_to_dict(get_task(task_id), udata["lang"])})
-
-
-async def wa_mark_done(request):
-    tg_user = _authed_user(request)
-    if not tg_user:
-        return web.json_response({"error": "unauthorized"}, status=401)
-
-    uid = int(tg_user["id"])
-    udata = get_user(uid)
-    try:
-        task_id = int(request.match_info["task_id"])
-    except (KeyError, ValueError):
-        return web.json_response({"error": "bad_id"}, status=400)
-
-    row = get_task(task_id)
-    if not row:
-        return web.json_response({"error": "not_found"}, status=404)
-
-    name_match = (row["assignee_id"] is None and
-                  (row["assignee_name"] or "").strip().lower() == (udata["full_name"] or "").strip().lower())
-    allowed = udata["role"] == "admin" or row["assignee_id"] == uid or name_match
-    if not allowed:
-        return web.json_response({"error": "forbidden"}, status=403)
-
-    set_task_done(task_id)
-    return web.json_response({"ok": True})
+        logging.info("notify send failed: %s", e)
+        return web.json_response({"ok": False, "reason": str(e)})
 
 
-async def wa_delete_task(request):
-    tg_user = _authed_user(request)
-    if not tg_user:
-        return web.json_response({"error": "unauthorized"}, status=401)
-
-    uid = int(tg_user["id"])
-    udata = get_user(uid)
-    if udata["role"] != "admin":
-        return web.json_response({"error": "forbidden"}, status=403)
-
-    try:
-        task_id = int(request.match_info["task_id"])
-    except (KeyError, ValueError):
-        return web.json_response({"error": "bad_id"}, status=400)
-
-    if not get_task(task_id):
-        return web.json_response({"error": "not_found"}, status=404)
-
-    delete_task(task_id)
-    return web.json_response({"ok": True})
+async def wa_health(request):
+    return web.json_response({"ok": True, "db": DB_PATH})
 
 
 def build_web_app() -> web.Application:
     app = web.Application()
-    app.router.add_get("/", wa_index)
-    app.router.add_get("/api/bootstrap", wa_bootstrap)
-    app.router.add_post("/api/tasks", wa_create_task)
-    app.router.add_post("/api/tasks/{task_id}/done", wa_mark_done)
-    app.router.add_delete("/api/tasks/{task_id}", wa_delete_task)
+    app.router.add_get("/healthz", wa_health)
+    app.router.add_post("/notify", wa_notify)
     return app
 
 
