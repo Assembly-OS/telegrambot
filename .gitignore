@@ -9,3 +9,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Резервная копия .env — содержит тот же токен, что и .env
+.env.bak
+.env.*
+.DS_Store

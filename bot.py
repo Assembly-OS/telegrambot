@@ -8,12 +8,14 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from urllib.parse import parse_qsl
 
 import aiohttp
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -70,6 +72,21 @@ STATUS_SUBMITTED = "TEKSHIRUVDA"  # исполнитель сдал на про�
 STATUS_DONE = "BAJARILDI"     # принято автором
 # «Активные» для исполнителя — всё, что ещё не закрыто и не на проверке.
 ACTIVE_STATUSES = ("YANGI", "QABUL_QILINDI", "BAJARILMOQDA", "QAYTARILDI")
+
+# --- ФИЛЬТРЫ СПИСКА «ВСЕ ПОРУЧЕНИЯ» ---
+# Порядок = от самого срочного к самому спокойному: руководитель почти всегда
+# ищет верх списка, поэтому KRITIK стоит первым.
+PRIORITY_ORDER = ("KRITIK", "YUQORI", "ORTA", "PAST")
+PRIORITY_LABELS = {
+    'ru': {"KRITIK": "Критичный", "YUQORI": "Высокий", "ORTA": "Средний", "PAST": "Низкий"},
+    'uz': {"KRITIK": "Kritik", "YUQORI": "Yuqori", "ORTA": "O'rta", "PAST": "Past"},
+    'en': {"KRITIK": "Critical", "YUQORI": "High", "ORTA": "Medium", "PAST": "Low"},
+}
+# Сколько поручений показывать на одной странице. Telegram режет сообщение на
+# 4096 символах, а один блок занимает ~150 — восьми хватает с запасом.
+TASKS_PAGE = 8
+# Сколько исполнителей влезает в один экран выбора.
+ASSIGNEES_PAGE = 8
 
 # --- НАПРАВЛЕНИЯ = ОТДЕЛЫ ПЛАТФОРМЫ ---
 DIRECTIONS = [
@@ -137,7 +154,14 @@ MESSAGES = {
         'status_done': "Выполнено",
         'admin_granted': "👑 <b>Права Главного (Администратора) получены!</b>",
         'admin_login_disabled': "⛔ Вход администратора отключён. Задайте ADMIN_SECRET в .env.",
-        'admin_login_wrong': "⛔ Неверный пароль администратора."
+        'admin_login_wrong': "⛔ Неверный пароль администратора.",
+        'flt_priority': "Приоритет",
+        'flt_assignee': "Исполнитель",
+        'flt_all': "Все",
+        'flt_pick_assignee': "👤 <b>Выберите исполнителя:</b>",
+        'flt_back': "← Назад к списку",
+        'flt_empty': "🔍 По этому фильтру поручений нет.",
+        'flt_shown': "показано {from}–{to} из {total}"
     },
     'uz': {
         'welcome': "🏛 <b>ASSAMBLEYA AI OS — Boshqaruv tizimi</b>\n\nXush kelibsiz, <b>{name}</b>!\nSizning rolingiz: <b>{role}</b>",
@@ -172,7 +196,14 @@ MESSAGES = {
         'status_done': "Bajarildi",
         'admin_granted': "👑 <b>Boshliq (Admin) huquqlari berildi!</b>",
         'admin_login_disabled': "⛔ Administrator kirishi o'chirilgan. .env faylida ADMIN_SECRET ni belgilang.",
-        'admin_login_wrong': "⛔ Administrator paroli noto'g'ri."
+        'admin_login_wrong': "⛔ Administrator paroli noto'g'ri.",
+        'flt_priority': "Muhimlik",
+        'flt_assignee': "Ijrochi",
+        'flt_all': "Hammasi",
+        'flt_pick_assignee': "👤 <b>Ijrochini tanlang:</b>",
+        'flt_back': "← Ro'yxatga qaytish",
+        'flt_empty': "🔍 Ushbu filtr bo'yicha topshiriq yo'q.",
+        'flt_shown': "{total} tadan {from}–{to} ko'rsatilmoqda"
     },
     'en': {
         'welcome': "🏛 <b>ASSAMBLEYA AI OS — Management System</b>\n\nWelcome, <b>{name}</b>!\nYour role: <b>{role}</b>",
@@ -207,7 +238,14 @@ MESSAGES = {
         'status_done': "Done",
         'admin_granted': "👑 <b>Chief (Admin) rights granted!</b>",
         'admin_login_disabled': "⛔ Admin login is disabled. Set ADMIN_SECRET in .env.",
-        'admin_login_wrong': "⛔ Wrong admin password."
+        'admin_login_wrong': "⛔ Wrong admin password.",
+        'flt_priority': "Priority",
+        'flt_assignee': "Assignee",
+        'flt_all': "All",
+        'flt_pick_assignee': "👤 <b>Choose an assignee:</b>",
+        'flt_back': "← Back to the list",
+        'flt_empty': "🔍 No tasks match this filter.",
+        'flt_shown': "showing {from}–{to} of {total}"
     }
 }
 
@@ -365,6 +403,58 @@ def create_task(title, department, loyiha_id, from_pid, to_pid, deadline, priori
 def get_all_tasks():
     with db_conn() as conn:
         return conn.execute(f"SELECT {_TASK_COLS} {_TASK_JOIN} ORDER BY t.id DESC LIMIT 50").fetchall()
+
+
+def _task_filter(priority, assignee_id):
+    """Общий WHERE для списка «Все поручения»: пустой фильтр = без условий."""
+    where, params = [], []
+    if priority:
+        where.append("t.priority = ?")
+        params.append(priority)
+    if assignee_id:
+        where.append("t.to_user_id = ?")
+        params.append(assignee_id)
+    return ("WHERE " + " AND ".join(where)) if where else "", params
+
+
+def get_tasks_page(priority=None, assignee_id=None, offset=0, limit=TASKS_PAGE):
+    """Страница отфильтрованного списка + общее число совпадений.
+
+    Считаем и выбираем одним фильтром, чтобы счётчик на кнопках страниц не
+    разошёлся с тем, что реально показано.
+    """
+    clause, params = _task_filter(priority, assignee_id)
+    with db_conn() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) AS c FROM tasks t {clause}", params
+        ).fetchone()["c"]
+        rows = conn.execute(
+            f"SELECT {_TASK_COLS} {_TASK_JOIN} {clause} ORDER BY t.id DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+    return rows, total
+
+
+def get_task_assignees(priority=None):
+    """Исполнители, у которых есть поручения при текущем фильтре приоритета.
+
+    Список строится по фактическим задачам, а не по всем пользователям, чтобы
+    в выборе не было заведомо пустых вариантов.
+    """
+    clause, params = _task_filter(priority, None)
+    with db_conn() as conn:
+        return conn.execute(
+            f"SELECT t.to_user_id AS id, s.full_name AS name, COUNT(*) AS cnt "
+            f"FROM tasks t JOIN users s ON s.id = t.to_user_id {clause} "
+            "GROUP BY t.to_user_id, s.full_name ORDER BY s.full_name",
+            params,
+        ).fetchall()
+
+
+def get_user_name(pid: int):
+    with db_conn() as conn:
+        row = conn.execute("SELECT full_name FROM users WHERE id = ?", (pid,)).fetchone()
+    return row["full_name"] if row else None
 
 
 def get_task(task_id: int):
@@ -709,6 +799,145 @@ async def process_deadline(message: Message, state: FSMContext):
 
 # --- ПРОСМОТР И ВЫПОЛНЕНИЕ ЗАДАЧ В ЧАТЕ ---
 
+def _prio_label(lang, priority):
+    return PRIORITY_LABELS.get(lang, PRIORITY_LABELS['ru']).get(priority, priority)
+
+
+def render_all_tasks(lang, priority, assignee_id, page):
+    """Один экран списка «Все поручения» — текст и клавиатура фильтров.
+
+    Список живёт в одном сообщении, которое перерисовывается на каждое нажатие:
+    иначе каждый выбор фильтра плодил бы новую простыню в чате.
+    """
+    t = MESSAGES[lang]
+    rows, total = get_tasks_page(priority, assignee_id, offset=page * TASKS_PAGE)
+
+    # Фильтр мог сузить выборку так, что текущая страница уехала за конец.
+    pages = max(1, (total + TASKS_PAGE - 1) // TASKS_PAGE)
+    if page >= pages:
+        page = pages - 1
+        rows, total = get_tasks_page(priority, assignee_id, offset=page * TASKS_PAGE)
+
+    who = get_user_name(assignee_id) if assignee_id else None
+    head = (
+        f"📋 <b>{esc(t['btn_all_tasks'])}</b>\n"
+        f"• {esc(t['flt_priority'])}: <b>{esc(_prio_label(lang, priority) if priority else t['flt_all'])}</b>\n"
+        f"• {esc(t['flt_assignee'])}: <b>{esc(who or t['flt_all'])}</b>\n"
+    )
+
+    if total == 0:
+        return head + "\n" + t['flt_empty'], filters_keyboard(lang, priority, assignee_id, page, pages)
+
+    first = page * TASKS_PAGE + 1
+    head += "• " + esc(
+        t['flt_shown'].replace("{from}", str(first))
+                      .replace("{to}", str(first + len(rows) - 1))
+                      .replace("{total}", str(total))
+    ) + "\n\n"
+
+    body = "".join(
+        f"🔹 <b>{esc(row['code'])} {esc(row['title'])}</b>\n"
+        f"• {esc(row['direction_code'] or '—')} | → {esc(row['assignee_name'])}\n"
+        f"• <code>{esc(row['deadline'] or '—')}</code> | "
+        f"{esc(_prio_label(lang, row['priority']))} | "
+        f"Status: <code>{esc(row['status'])}</code>\n\n"
+        for row in rows
+    )
+    return head + body, filters_keyboard(lang, priority, assignee_id, page, pages)
+
+
+def filters_keyboard(lang, priority, assignee_id, page, pages):
+    """Приоритет одной строкой, исполнитель — отдельным экраном, снизу страницы."""
+    t = MESSAGES[lang]
+    prio_code = priority or "ALL"
+    uid = assignee_id or 0
+
+    def mark(active, text):
+        return f"• {text} •" if active else text
+
+    rows = [[InlineKeyboardButton(
+        text=mark(priority is None, t['flt_all']),
+        callback_data=f"af:ALL:{uid}:0",
+    )]]
+    # Четыре приоритета в два ряда: в один ряд подписи вроде «Критичный» не влезают.
+    for pair in (PRIORITY_ORDER[:2], PRIORITY_ORDER[2:]):
+        rows.append([
+            InlineKeyboardButton(
+                text=mark(priority == code, _prio_label(lang, code)),
+                callback_data=f"af:{code}:{uid}:0",
+            )
+            for code in pair
+        ])
+
+    who = get_user_name(assignee_id) if assignee_id else None
+    rows.append([InlineKeyboardButton(
+        text=f"👤 {t['flt_assignee']}: {who or t['flt_all']}",
+        callback_data=f"ap:{prio_code}:{uid}:0",
+    )])
+
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀", callback_data=f"af:{prio_code}:{uid}:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="af:noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(text="▶", callback_data=f"af:{prio_code}:{uid}:{page + 1}"))
+        rows.append(nav)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def assignees_keyboard(lang, priority, assignee_id, page):
+    """Экран выбора исполнителя: по одному в ряд, чтобы влезали длинные ФИО."""
+    t = MESSAGES[lang]
+    prio_code = priority or "ALL"
+    people = get_task_assignees(priority)
+    pages = max(1, (len(people) + ASSIGNEES_PAGE - 1) // ASSIGNEES_PAGE)
+    page = max(0, min(page, pages - 1))
+    window = people[page * ASSIGNEES_PAGE:(page + 1) * ASSIGNEES_PAGE]
+
+    rows = [[InlineKeyboardButton(
+        text=("• " if not assignee_id else "") + f"{t['flt_all']}",
+        callback_data=f"af:{prio_code}:0:0",
+    )]]
+    for person in window:
+        mark = "• " if person["id"] == assignee_id else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{mark}{person['name']} ({person['cnt']})",
+            callback_data=f"af:{prio_code}:{person['id']}:0",
+        )])
+
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀", callback_data=f"ap:{prio_code}:{assignee_id or 0}:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="af:noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(text="▶", callback_data=f"ap:{prio_code}:{assignee_id or 0}:{page + 1}"))
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(
+        text=t['flt_back'], callback_data=f"af:{prio_code}:{assignee_id or 0}:0"
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _parse_filter(data: str):
+    """"af:KRITIK:12:1" -> ("KRITIK", 12, 1). ALL/0 означают «без фильтра»."""
+    _, prio, uid, page = data.split(":", 3)
+    return (None if prio == "ALL" else prio), (int(uid) or None), int(page)
+
+
+async def _safe_edit(message, text, keyboard):
+    """Нажатие на уже активный фильтр ничего не меняет, а Telegram считает
+    правку без изменений ошибкой. Для пользователя это не ошибка — молчим."""
+    try:
+        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as err:
+        if "not modified" not in str(err):
+            raise
+
+
 @router.message(F.text.in_(["📊 Все поручения", "📊 Barcha topshiriqlar", "📊 All Tasks"]))
 async def show_all_tasks(message: Message):
     user_data = get_user(message.from_user.id)
@@ -721,28 +950,41 @@ async def show_all_tasks(message: Message):
         await message.answer(t['no_access'])
         return
 
-    tasks = get_all_tasks()
-    if not tasks:
-        await message.answer(t['no_tasks'])
+    text, keyboard = render_all_tasks(user_data['lang'], None, None, 0)
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("af:"))
+async def filter_all_tasks(callback):
+    user_data = get_user(callback.from_user.id)
+    if not user_data.get('linked') or user_data['role'] != 'admin':
+        await callback.answer()
+        return
+    if callback.data == "af:noop":       # счётчик страниц — не кнопка
+        await callback.answer()
         return
 
-    # Telegram caps a message at 4096 chars, so send the list in chunks
-    # instead of one giant message (which fails with "message is too long").
-    header = f"📋 <b>{esc(t['btn_all_tasks'])}</b> ({len(tasks)}):\n\n"
-    chunk = header
-    for row in tasks:
-        block = (
-            f"🔹 <b>{esc(row['code'])} {esc(row['title'])}</b>\n"
-            f"• {esc(row['direction_code'] or '—')} | → {esc(row['assignee_name'])}\n"
-            f"• <code>{esc(row['deadline'] or '—')}</code> | "
-            f"Status: <code>{esc(row['status'])}</code>\n\n"
-        )
-        if len(chunk) + len(block) > 3800:
-            await message.answer(chunk, parse_mode="HTML")
-            chunk = ""
-        chunk += block
-    if chunk.strip():
-        await message.answer(chunk, parse_mode="HTML")
+    priority, assignee_id, page = _parse_filter(callback.data)
+    text, keyboard = render_all_tasks(user_data['lang'], priority, assignee_id, page)
+    await _safe_edit(callback.message, text, keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap:"))
+async def pick_assignee(callback):
+    user_data = get_user(callback.from_user.id)
+    if not user_data.get('linked') or user_data['role'] != 'admin':
+        await callback.answer()
+        return
+
+    priority, assignee_id, page = _parse_filter(callback.data)
+    t = MESSAGES[user_data['lang']]
+    await _safe_edit(
+        callback.message,
+        t['flt_pick_assignee'],
+        assignees_keyboard(user_data['lang'], priority, assignee_id, page),
+    )
+    await callback.answer()
 
 
 @router.message(F.text.in_(["📋 Мои задания", "📋 Mening topshiriqlarim", "📋 My Tasks"]))
@@ -863,7 +1105,282 @@ def build_web_app() -> web.Application:
     return app
 
 
+
+# --- ЕЖЕНЕДЕЛЬНЫЙ ОТЧЁТ ---
+# Пятница, 18:00 по времени сервера: сводка недели уходит Раису и всем
+# руководителям, у кого привязан Telegram. Отчёт считает платформа — бот только
+# забирает готовый текст, чтобы цифры на сайте и в сообщении не разошлись.
+
+REPORT_WEEKDAY = int(os.getenv("REPORT_WEEKDAY", "4"))   # 0=понедельник, 4=пятница
+REPORT_HOUR = int(os.getenv("REPORT_HOUR", "18"))
+REPORT_MINUTE = int(os.getenv("REPORT_MINUTE", "0"))
+
+
+def _report_marker(when: datetime) -> str:
+    """Год и номер недели — чтобы за одну неделю отчёт ушёл ровно один раз."""
+    year, week, _ = when.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _report_already_sent(marker: str) -> bool:
+    with db_conn() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS bot_reports (marker TEXT PRIMARY KEY, sent_at TEXT)"
+        )
+        row = conn.execute(
+            "SELECT marker FROM bot_reports WHERE marker = ?", (marker,)
+        ).fetchone()
+        return row is not None
+
+
+def _mark_report_sent(marker: str):
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO bot_reports (marker, sent_at) VALUES (?, ?)",
+            (marker, _now()),
+        )
+
+
+async def fetch_weekly_report(offset: int = 0):
+    """Забирает готовый текст отчёта и список получателей у платформы."""
+    url = f"{PLATFORM_API}/api/reports/weekly?format=text&offset={offset}"
+    headers = {"X-Notify-Secret": NOTIFY_SECRET} if NOTIFY_SECRET else {}
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                logging.warning("Отчёт недоступен: HTTP %s", response.status)
+                return None
+            return await response.json()
+
+
+async def send_weekly_report(offset: int = 0) -> int:
+    """Рассылает отчёт. Возвращает число доставленных сообщений."""
+    data = await fetch_weekly_report(offset)
+    if not data:
+        return 0
+
+    text = data.get("text") or ""
+    delivered = 0
+    for pid in data.get("recipients", []):
+        tg_id = get_telegram_id(pid)
+        if not tg_id:
+            continue
+        try:
+            await bot.send_message(tg_id, text, parse_mode="HTML")
+            delivered += 1
+        except Exception as exc:  # заблокировал бота, удалил чат и т.п.
+            logging.warning("Отчёт не доставлен pid=%s: %s", pid, exc)
+    return delivered
+
+
+# --- НАПОМИНАНИЕ О ВЫВОДАХ СОВЕЩАНИЙ ---
+# Каждое утро Раис и его помощник получают то, чем закончились совещания
+# последних дней. Вывод рассылается один раз при разборе — но именно он через
+# неделю нужен, а не в тот момент; напоминание возвращает его в поле зрения.
+# Каждому на его языке: анализ пишет вывод сразу на трёх.
+
+DIGEST_HOUR = int(os.getenv("MEETING_DIGEST_HOUR", "9"))
+DIGEST_MINUTE = int(os.getenv("MEETING_DIGEST_MINUTE", "0"))
+DIGEST_DAYS = int(os.getenv("MEETING_DIGEST_DAYS", "7"))
+DIGEST_LOGINS = [
+    login.strip().lower()
+    for login in os.getenv("MEETING_BRIEF_LOGINS", "muslimbek.komiljonov").split(",")
+    if login.strip()
+]
+
+DIGEST_LABELS = {
+    "ru": ("Выводы совещаний за последние дни", "Ключевые пункты", "Решения"),
+    "en": ("Meeting conclusions from recent days", "Key points", "Decisions"),
+    "uz": ("So'nggi kunlardagi uchrashuv xulosalari", "Asosiy nuqtalar", "Qarorlar"),
+}
+
+# Ради чего вообще ведётся запись: держать в поле зрения не совещания, а
+# отношения. Что кому уже предлагали и что стоит предложить теперь.
+IDEAS_LABELS = {
+    "ru": "Что можно предложить",
+    "en": "Worth proposing",
+    "uz": "Taklif qilish mumkin",
+}
+
+
+def _digest_recipients():
+    """Раис плюс те, кого назвали в MEETING_BRIEF_LOGINS."""
+    marks = ",".join("?" for _ in DIGEST_LOGINS) or "''"
+    with db_conn() as conn:
+        rows = conn.execute(
+            f"SELECT id, lang FROM users "
+            f"WHERE is_active = 1 AND (role = 'RAIS' OR LOWER(login) IN ({marks}))",
+            tuple(DIGEST_LOGINS),
+        ).fetchall()
+    return [(row[0], row[1] or "uz") for row in rows]
+
+
+def _digest_text(lang: str) -> str:
+    """Выводы за последние дни на языке читателя. Пусто — значит нечего слать."""
+    code = lang if lang in ("ru", "en") else "uz"
+    title, points_label, decisions_label = DIGEST_LABELS[code]
+    since = f"-{DIGEST_DAYS} days"
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT m.title, m.created_at, c.summary, c.key_points, c.decisions "
+            "  FROM meetings m "
+            "  JOIN meeting_conclusions c ON c.meeting_id = m.id AND c.lang = ? "
+            " WHERE m.created_at >= datetime('now', ?) "
+            " ORDER BY m.id DESC LIMIT 10",
+            (code, since),
+        ).fetchall()
+    with db_conn() as conn:
+        ideas = conn.execute(
+            f"SELECT p.name, i.proposal_{code}, i.why_{code}, m.name "
+            f"  FROM partner_ideas i "
+            f"  JOIN partners p ON p.id = i.partner_id "
+            f"  LEFT JOIN partners m ON m.id = i.match_id "
+            f" WHERE i.status = 'yangi' ORDER BY i.id DESC LIMIT 6",
+        ).fetchall()
+
+    if not rows and not ideas:
+        return ""
+
+    parts = [f"🗒 <b>{title}</b>"]
+    for meeting_title, created_at, summary, key_points, decisions in rows:
+        day = (created_at or "")[:10]
+        parts.append(f"\n<b>{meeting_title}</b> · {day}")
+        if summary:
+            parts.append(summary)
+        for label, raw in ((points_label, key_points), (decisions_label, decisions)):
+            try:
+                items = json.loads(raw or "[]")
+            except (TypeError, ValueError):
+                items = []
+            if items:
+                lines = "\n".join(f"• {item}" for item in items)
+                parts.append(f"<i>{label}:</i>\n{lines}")
+    if ideas:
+        parts.append(f"\n💡 <b>{IDEAS_LABELS[code]}</b>")
+        for partner, proposal, why, match in ideas:
+            if not proposal:
+                continue
+            line = f"• <b>{partner}</b> — {proposal}"
+            if match:
+                line += f" ↔ {match}"
+            if why:
+                line += f"\n  <i>{why}</i>"
+            parts.append(line)
+
+    # Telegram обрывает сообщение длиннее 4096 символов.
+    return "\n".join(parts)[:3800]
+
+
+async def send_meeting_digest() -> int:
+    delivered = 0
+    for pid, lang in _digest_recipients():
+        tg_id = get_telegram_id(pid)
+        if not tg_id:
+            continue
+        text = _digest_text(lang)
+        if not text:
+            continue
+        try:
+            await bot.send_message(tg_id, text, parse_mode="HTML")
+            delivered += 1
+        except Exception as exc:
+            logging.warning("Дайджест не доставлен pid=%s: %s", pid, exc)
+    return delivered
+
+
+async def meeting_digest_loop():
+    """Раз в минуту проверяет, не пора ли напомнить о выводах."""
+    while True:
+        try:
+            now = datetime.now()
+            if now.hour == DIGEST_HOUR and now.minute >= DIGEST_MINUTE:
+                marker = f"digest-{now:%Y-%m-%d}"
+                if not _report_already_sent(marker):
+                    _mark_report_sent(marker)
+                    count = await send_meeting_digest()
+                    logging.info("Дайджест совещаний %s: %s получателей",
+                                 marker, count)
+        except Exception as exc:
+            logging.exception("Сбой в цикле дайджеста совещаний: %s", exc)
+        await asyncio.sleep(60)
+
+
+# --- ДОСТАВКА НАПОМИНАНИЙ ---
+# Платформа сама разбирает очередь напоминаний, когда кто-нибудь открыл сайт.
+# Ночью и в выходные там никого нет, а срок наступает всё равно — поэтому раз
+# в минуту бот дёргает ту же процедуру. Она идемпотентна: кто успел первым, тот
+# и отправил, повторов нет.
+
+DISPATCH_EVERY = int(os.getenv("REMINDER_DISPATCH_SECONDS", "60"))
+
+
+async def dispatch_reminders() -> int:
+    url = f"{PLATFORM_API}/api/reminders/dispatch"
+    headers = {"X-Notify-Secret": NOTIFY_SECRET} if NOTIFY_SECRET else {}
+    timeout = aiohttp.ClientTimeout(total=20)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, headers=headers) as response:
+                if response.status != 200:
+                    return 0
+                data = await response.json()
+                return int(data.get("fired", 0))
+    except Exception:
+        # Платформа перезапускается или недоступна — попробуем через минуту.
+        return 0
+
+
+async def reminder_loop():
+    while True:
+        try:
+            fired = await dispatch_reminders()
+            if fired:
+                logging.info("Напоминаний отправлено: %s", fired)
+        except Exception as exc:
+            logging.exception("Сбой в цикле напоминаний: %s", exc)
+        await asyncio.sleep(DISPATCH_EVERY)
+
+
+async def weekly_report_loop():
+    """Раз в минуту проверяет, не наступило ли время еженедельной рассылки."""
+    while True:
+        try:
+            now = datetime.now()
+            due = (
+                now.weekday() == REPORT_WEEKDAY
+                and now.hour == REPORT_HOUR
+                and now.minute >= REPORT_MINUTE
+            )
+            if due:
+                marker = _report_marker(now)
+                if not _report_already_sent(marker):
+                    # Метка ставится до отправки: даже если рассылка упадёт на
+                    # середине, повтора через минуту не будет.
+                    _mark_report_sent(marker)
+                    count = await send_weekly_report(0)
+                    logging.info("Еженедельный отчёт %s отправлен: %s получателей",
+                                 marker, count)
+        except Exception as exc:
+            logging.exception("Сбой в цикле еженедельного отчёта: %s", exc)
+        await asyncio.sleep(60)
+
+
+@router.message(Command("hisobot"))
+async def cmd_report_now(message: Message):
+    """Ручная отправка отчёта — для проверки и для «пришли прямо сейчас»."""
+    user = get_user(message.from_user.id)
+    if not user or (user["role"] not in MANAGER_ROLES and message.from_user.id not in ADMIN_IDS):
+        return
+    data = await fetch_weekly_report(0)
+    if not data:
+        await message.answer("Hisobotni olish imkoni bo'lmadi.")
+        return
+    await message.answer(data.get("text") or "—", parse_mode="HTML")
+
+
 # --- ЗАПУСК ---
+
 
 async def main():
     init_db()
@@ -882,9 +1399,16 @@ async def main():
     logging.info("Mini App сервер: http://%s:%s | публичный URL: %s",
                  WEBAPP_HOST, WEBAPP_PORT, WEBAPP_URL or "— (не задан)")
 
+    reporter = asyncio.create_task(weekly_report_loop())
+    digester = asyncio.create_task(meeting_digest_loop())
+    reminders = asyncio.create_task(reminder_loop())
+
     try:
         await dp.start_polling(bot)
     finally:
+        reporter.cancel()
+        digester.cancel()
+        reminders.cancel()
         await runner.cleanup()
 
 
