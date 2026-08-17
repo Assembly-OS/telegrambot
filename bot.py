@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import html
 import json
+import io
 import logging
 import os
 import sqlite3
@@ -39,7 +40,7 @@ except ImportError:
     pass
 
 # --- НАСТРОЙКИ ---
-# Общая база с платформой Assambleya OS (Next.js). Бот и платформа работают с
+# Общая база с платформой Assembly OS (Next.js). Бот и платформа работают с
 # ОДНИМИ пользователями и задачами. По умолчанию — ../data/assambleya.db.
 _DEFAULT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "assambleya.db")
 DB_PATH = os.getenv("PLATFORM_DB", _DEFAULT_DB)
@@ -122,129 +123,129 @@ def esc(value) -> str:
 # --- МНОГОЯЗЫЧНЫЙ ТЕКСТ (разметка — HTML) ---
 MESSAGES = {
     'ru': {
-        'welcome': "🏛 <b>ASSAMBLEYA AI OS — Система управления</b>\n\nПриветствуем, <b>{name}</b>!\nВаша роль: <b>{role}</b>",
-        'role_admin': "👑 Главный (Администратор)",
-        'role_worker': "👷 Работник / Исполнитель",
-        'btn_add_task': "➕ Дать задание",
-        'btn_my_tasks': "📋 Мои задания",
-        'btn_all_tasks': "📊 Все поручения",
-        'btn_profile': "💼 Мой профиль / Должность",
-        'btn_admin_panel': "⚙️ Админ-панель",
-        'btn_change_lang': "🌐 Сменить язык",
-        'btn_open_app': "📱 Открыть приложение",
-        'choose_lang': "🌐 <b>Выберите язык / Tilni tanlang / Choose language:</b>",
-        'enter_title': "📝 Введите <b>суть / описание задания</b>:",
-        'choose_dir': "🏢 Выберите <b>направление (GR/FR/BR/PR)</b>:",
-        'choose_proj': "🎯 Выберите <b>проект</b>:",
-        'no_proj': "🚫 Без проекта",
-        'enter_assignee': "👤 Напишите <b>ФИО или должность работника</b>:",
-        'choose_assignee': "👤 Выберите <b>ответственного</b> (из тех, кто запускал бота):",
-        'no_users': "⚠️ Пока никто не запускал бота, кроме вас. Попросите сотрудников открыть бота и нажать /start.",
-        'enter_deadline': "📅 Укажите <b>срок исполнения (Дедлайн)</b>:",
-        'task_created': "✅ <b>Задание #{id} успешно создано!</b>\n\n📌 <b>Суть:</b> {title}\n🏛 <b>Направление:</b> {dir}\n👤 <b>Ответственный:</b> {assignee}\n⏰ <b>Срок:</b> {deadline}",
-        'task_assigned': "🔔 <b>Вам назначено новое задание #{id}!</b>\n\n📌 <b>Суть:</b> {title}\n🏛 <b>Направление:</b> {dir}\n⏰ <b>Срок:</b> {deadline}",
-        'btn_done': "✅ Отметить как выполненное",
-        'no_tasks': "🎉 Нет активных заданий!",
-        'task_done_msg': "✅ Задание выполнено!",
-        'admin_profile': "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n👤 <b>Пользователь:</b> {name}\n🏛 <b>Должность:</b> Главный руководитель / Раис\n🔑 <b>Права:</b> Полный доступ ко всем функциям.",
-        'worker_profile': "💼 <b>ПРОФИЛЬ СОТРУДНИКА</b>\n\n👤 <b>Пользователь:</b> {name}\n🏢 <b>Должность:</b> Исполнитель / Работник\n🔑 <b>Права:</b> Просмотр и выполнение заданий.",
-        'no_access': "⛔ У вас нет прав для выполнения этой команды.",
-        'webapp_error': "⚠️ Не удалось обработать данные из приложения. Попробуйте ещё раз.",
+        'welcome': "<b>ASSEMBLY AI OS — Система управления</b>\n\nПриветствуем, <b>{name}</b>!\nВаша роль: <b>{role}</b>",
+        'role_admin': "Главный (Администратор)",
+        'role_worker': "Работник / Исполнитель",
+        'btn_add_task': "Дать задание",
+        'btn_my_tasks': "Мои задания",
+        'btn_all_tasks': "Все поручения",
+        'btn_profile': "Мой профиль / Должность",
+        'btn_admin_panel': "Админ-панель",
+        'btn_change_lang': "Сменить язык",
+        'btn_open_app': "Открыть приложение",
+        'choose_lang': "<b>Выберите язык / Tilni tanlang / Choose language:</b>",
+        'enter_title': "Введите <b>суть / описание задания</b>:",
+        'choose_dir': "Выберите <b>направление (GR/FR/BR/PR)</b>:",
+        'choose_proj': "Выберите <b>проект</b>:",
+        'no_proj': "Без проекта",
+        'enter_assignee': "Напишите <b>ФИО или должность работника</b>:",
+        'choose_assignee': "Выберите <b>ответственного</b> (из тех, кто запускал бота):",
+        'no_users': "Пока никто не запускал бота, кроме вас. Попросите сотрудников открыть бота и нажать /start.",
+        'enter_deadline': "Укажите <b>срок исполнения (Дедлайн)</b>:",
+        'task_created': "<b>Задание #{id} успешно создано!</b>\n\n<b>Суть:</b> {title}\n<b>Направление:</b> {dir}\n<b>Ответственный:</b> {assignee}\n<b>Срок:</b> {deadline}",
+        'task_assigned': "<b>Вам назначено новое задание #{id}!</b>\n\n<b>Суть:</b> {title}\n<b>Направление:</b> {dir}\n<b>Срок:</b> {deadline}",
+        'btn_done': "Отметить как выполненное",
+        'no_tasks': "Нет активных заданий!",
+        'task_done_msg': "Задание выполнено!",
+        'admin_profile': "<b>АДМИН-ПАНЕЛЬ</b>\n\n<b>Пользователь:</b> {name}\n<b>Должность:</b> Главный руководитель / Раис\n<b>Права:</b> Полный доступ ко всем функциям.",
+        'worker_profile': "<b>ПРОФИЛЬ СОТРУДНИКА</b>\n\n<b>Пользователь:</b> {name}\n<b>Должность:</b> Исполнитель / Работник\n<b>Права:</b> Просмотр и выполнение заданий.",
+        'no_access': "У вас нет прав для выполнения этой команды.",
+        'webapp_error': "Не удалось обработать данные из приложения. Попробуйте ещё раз.",
         'status_in_progress': "В процессе",
         'status_done': "Выполнено",
-        'admin_granted': "👑 <b>Права Главного (Администратора) получены!</b>",
-        'admin_login_disabled': "⛔ Вход администратора отключён. Задайте ADMIN_SECRET в .env.",
-        'admin_login_wrong': "⛔ Неверный пароль администратора.",
+        'admin_granted': "<b>Права Главного (Администратора) получены!</b>",
+        'admin_login_disabled': "Вход администратора отключён. Задайте ADMIN_SECRET в .env.",
+        'admin_login_wrong': "Неверный пароль администратора.",
         'flt_priority': "Приоритет",
         'flt_assignee': "Исполнитель",
         'flt_all': "Все",
-        'flt_pick_assignee': "👤 <b>Выберите исполнителя:</b>",
+        'flt_pick_assignee': "<b>Выберите исполнителя:</b>",
         'flt_back': "← Назад к списку",
-        'flt_empty': "🔍 По этому фильтру поручений нет.",
+        'flt_empty': "По этому фильтру поручений нет.",
         'flt_shown': "показано {from}–{to} из {total}"
     },
     'uz': {
-        'welcome': "🏛 <b>ASSAMBLEYA AI OS — Boshqaruv tizimi</b>\n\nXush kelibsiz, <b>{name}</b>!\nSizning rolingiz: <b>{role}</b>",
-        'role_admin': "👑 Boshliq (Admin)",
-        'role_worker': "👷 Xodim / Bajaruvchi",
-        'btn_add_task': "➕ Topshiriq berish",
-        'btn_my_tasks': "📋 Mening topshiriqlarim",
-        'btn_all_tasks': "📊 Barcha topshiriqlar",
-        'btn_profile': "💼 Mening lavozimim",
-        'btn_admin_panel': "⚙️ Admin panel",
-        'btn_change_lang': "🌐 Tilni o'zgartirish",
-        'btn_open_app': "📱 Ilovani ochish",
-        'choose_lang': "🌐 <b>Tilni tanlang / Выберите язык / Choose language:</b>",
-        'enter_title': "📝 Topshiriq <b>mazmunini</b> kiriting:",
-        'choose_dir': "🏢 <b>Yo'nalishni tanlang (GR/FR/BR/PR):</b>",
-        'choose_proj': "🎯 <b>Loyiha tanlang:</b>",
-        'no_proj': "🚫 Loyihasiz",
-        'enter_assignee': "👤 Xodimning <b>F.I.SH yoki lavozimini</b> kiriting:",
-        'choose_assignee': "👤 <b>Mas'ulni</b> tanlang (botni ishga tushirganlardan):",
-        'no_users': "⚠️ Hozircha sizdan boshqa hech kim botni ishga tushirmagan. Xodimlardan botni ochib /start bosishlarini so'rang.",
-        'enter_deadline': "📅 Topshiriq <b>muddatini (dedlayn)</b> kiriting:",
-        'task_created': "✅ <b>Topshiriq #{id} muvaffaqiyatli yaratildi!</b>\n\n📌 <b>Mazmuni:</b> {title}\n🏛 <b>Yo'nalish:</b> {dir}\n👤 <b>Mas'ul:</b> {assignee}\n⏰ <b>Muddat:</b> {deadline}",
-        'task_assigned': "🔔 <b>Sizga yangi topshiriq #{id} berildi!</b>\n\n📌 <b>Mazmuni:</b> {title}\n🏛 <b>Yo'nalish:</b> {dir}\n⏰ <b>Muddat:</b> {deadline}",
-        'btn_done': "✅ Bajarildi deb belgilash",
-        'no_tasks': "🎉 Faol topshiriqlar yo'q!",
-        'task_done_msg': "✅ Topshiriq bajarildi!",
-        'admin_profile': "👑 <b>ADMIN PANEL</b>\n\n👤 <b>Foydalanuvchi:</b> {name}\n🏛 <b>Lavozim:</b> Bosh rahbar / Rais\n🔑 <b>Huquqlar:</b> To'liq kirish huquqi.",
-        'worker_profile': "💼 <b>XODIM PROFILI</b>\n\n👤 <b>Foydalanuvchi:</b> {name}\n🏢 <b>Lavozim:</b> Ijrochi / Xodim\n🔑 <b>Huquqlar:</b> Topshiriqlarni ko'rish va bajarish.",
-        'no_access': "⛔ Ushbu buyruqni bajarish uchun sizda huquq yo'q.",
-        'webapp_error': "⚠️ Ilovadan kelgan ma'lumotni qayta ishlab bo'lmadi. Qayta urinib ko'ring.",
+        'welcome': "<b>ASSEMBLY AI OS — Boshqaruv tizimi</b>\n\nXush kelibsiz, <b>{name}</b>!\nSizning rolingiz: <b>{role}</b>",
+        'role_admin': "Boshliq (Admin)",
+        'role_worker': "Xodim / Bajaruvchi",
+        'btn_add_task': "Topshiriq berish",
+        'btn_my_tasks': "Mening topshiriqlarim",
+        'btn_all_tasks': "Barcha topshiriqlar",
+        'btn_profile': "Mening lavozimim",
+        'btn_admin_panel': "Admin panel",
+        'btn_change_lang': "Tilni o'zgartirish",
+        'btn_open_app': "Ilovani ochish",
+        'choose_lang': "<b>Tilni tanlang / Выберите язык / Choose language:</b>",
+        'enter_title': "Topshiriq <b>mazmunini</b> kiriting:",
+        'choose_dir': "<b>Yo'nalishni tanlang (GR/FR/BR/PR):</b>",
+        'choose_proj': "<b>Loyiha tanlang:</b>",
+        'no_proj': "Loyihasiz",
+        'enter_assignee': "Xodimning <b>F.I.SH yoki lavozimini</b> kiriting:",
+        'choose_assignee': "<b>Mas'ulni</b> tanlang (botni ishga tushirganlardan):",
+        'no_users': "Hozircha sizdan boshqa hech kim botni ishga tushirmagan. Xodimlardan botni ochib /start bosishlarini so'rang.",
+        'enter_deadline': "Topshiriq <b>muddatini (dedlayn)</b> kiriting:",
+        'task_created': "<b>Topshiriq #{id} muvaffaqiyatli yaratildi!</b>\n\n<b>Mazmuni:</b> {title}\n<b>Yo'nalish:</b> {dir}\n<b>Mas'ul:</b> {assignee}\n<b>Muddat:</b> {deadline}",
+        'task_assigned': "<b>Sizga yangi topshiriq #{id} berildi!</b>\n\n<b>Mazmuni:</b> {title}\n<b>Yo'nalish:</b> {dir}\n<b>Muddat:</b> {deadline}",
+        'btn_done': "Bajarildi deb belgilash",
+        'no_tasks': "Faol topshiriqlar yo'q!",
+        'task_done_msg': "Topshiriq bajarildi!",
+        'admin_profile': "<b>ADMIN PANEL</b>\n\n<b>Foydalanuvchi:</b> {name}\n<b>Lavozim:</b> Bosh rahbar / Rais\n<b>Huquqlar:</b> To'liq kirish huquqi.",
+        'worker_profile': "<b>XODIM PROFILI</b>\n\n<b>Foydalanuvchi:</b> {name}\n<b>Lavozim:</b> Ijrochi / Xodim\n<b>Huquqlar:</b> Topshiriqlarni ko'rish va bajarish.",
+        'no_access': "Ushbu buyruqni bajarish uchun sizda huquq yo'q.",
+        'webapp_error': "Ilovadan kelgan ma'lumotni qayta ishlab bo'lmadi. Qayta urinib ko'ring.",
         'status_in_progress': "Jarayonda",
         'status_done': "Bajarildi",
-        'admin_granted': "👑 <b>Boshliq (Admin) huquqlari berildi!</b>",
-        'admin_login_disabled': "⛔ Administrator kirishi o'chirilgan. .env faylida ADMIN_SECRET ni belgilang.",
-        'admin_login_wrong': "⛔ Administrator paroli noto'g'ri.",
+        'admin_granted': "<b>Boshliq (Admin) huquqlari berildi!</b>",
+        'admin_login_disabled': "Administrator kirishi o'chirilgan. .env faylida ADMIN_SECRET ni belgilang.",
+        'admin_login_wrong': "Administrator paroli noto'g'ri.",
         'flt_priority': "Muhimlik",
         'flt_assignee': "Ijrochi",
         'flt_all': "Hammasi",
-        'flt_pick_assignee': "👤 <b>Ijrochini tanlang:</b>",
+        'flt_pick_assignee': "<b>Ijrochini tanlang:</b>",
         'flt_back': "← Ro'yxatga qaytish",
-        'flt_empty': "🔍 Ushbu filtr bo'yicha topshiriq yo'q.",
+        'flt_empty': "Ushbu filtr bo'yicha topshiriq yo'q.",
         'flt_shown': "{total} tadan {from}–{to} ko'rsatilmoqda"
     },
     'en': {
-        'welcome': "🏛 <b>ASSAMBLEYA AI OS — Management System</b>\n\nWelcome, <b>{name}</b>!\nYour role: <b>{role}</b>",
-        'role_admin': "👑 Chief (Admin)",
-        'role_worker': "👷 Employee / Worker",
-        'btn_add_task': "➕ Assign Task",
-        'btn_my_tasks': "📋 My Tasks",
-        'btn_all_tasks': "📊 All Tasks",
-        'btn_profile': "💼 My Position / Profile",
-        'btn_admin_panel': "⚙️ Admin Panel",
-        'btn_change_lang': "🌐 Change Language",
-        'btn_open_app': "📱 Open App",
-        'choose_lang': "🌐 <b>Select language / Tilni tanlang / Выберите язык:</b>",
-        'enter_title': "📝 Enter <b>task description</b>:",
-        'choose_dir': "🏢 Select <b>direction (GR/FR/BR/PR)</b>:",
-        'choose_proj': "🎯 Select <b>project</b>:",
-        'no_proj': "🚫 No project",
-        'enter_assignee': "👤 Enter <b>employee name or title</b>:",
-        'choose_assignee': "👤 Select the <b>assignee</b> (from users who started the bot):",
-        'no_users': "⚠️ Nobody except you has started the bot yet. Ask employees to open the bot and press /start.",
-        'enter_deadline': "📅 Enter <b>deadline</b>:",
-        'task_created': "✅ <b>Task #{id} successfully created!</b>\n\n📌 <b>Title:</b> {title}\n🏛 <b>Direction:</b> {dir}\n👤 <b>Assignee:</b> {assignee}\n⏰ <b>Deadline:</b> {deadline}",
-        'task_assigned': "🔔 <b>A new task #{id} was assigned to you!</b>\n\n📌 <b>Title:</b> {title}\n🏛 <b>Direction:</b> {dir}\n⏰ <b>Deadline:</b> {deadline}",
-        'btn_done': "✅ Mark as Completed",
-        'no_tasks': "🎉 No active tasks!",
-        'task_done_msg': "✅ Task completed!",
-        'admin_profile': "👑 <b>ADMIN PANEL</b>\n\n👤 <b>User:</b> {name}\n🏛 <b>Position:</b> Head / Leader\n🔑 <b>Permissions:</b> Full administrative access.",
-        'worker_profile': "💼 <b>EMPLOYEE PROFILE</b>\n\n👤 <b>User:</b> {name}\n🏢 <b>Position:</b> Worker / Executive\n🔑 <b>Permissions:</b> View and complete tasks.",
-        'no_access': "⛔ You do not have permission to execute this command.",
-        'webapp_error': "⚠️ Could not process data from the app. Please try again.",
+        'welcome': "<b>ASSEMBLY AI OS — Management System</b>\n\nWelcome, <b>{name}</b>!\nYour role: <b>{role}</b>",
+        'role_admin': "Chief (Admin)",
+        'role_worker': "Employee / Worker",
+        'btn_add_task': "Assign Task",
+        'btn_my_tasks': "My Tasks",
+        'btn_all_tasks': "All Tasks",
+        'btn_profile': "My Position / Profile",
+        'btn_admin_panel': "Admin Panel",
+        'btn_change_lang': "Change Language",
+        'btn_open_app': "Open App",
+        'choose_lang': "<b>Select language / Tilni tanlang / Выберите язык:</b>",
+        'enter_title': "Enter <b>task description</b>:",
+        'choose_dir': "Select <b>direction (GR/FR/BR/PR)</b>:",
+        'choose_proj': "Select <b>project</b>:",
+        'no_proj': "No project",
+        'enter_assignee': "Enter <b>employee name or title</b>:",
+        'choose_assignee': "Select the <b>assignee</b> (from users who started the bot):",
+        'no_users': "Nobody except you has started the bot yet. Ask employees to open the bot and press /start.",
+        'enter_deadline': "Enter <b>deadline</b>:",
+        'task_created': "<b>Task #{id} successfully created!</b>\n\n<b>Title:</b> {title}\n<b>Direction:</b> {dir}\n<b>Assignee:</b> {assignee}\n<b>Deadline:</b> {deadline}",
+        'task_assigned': "<b>A new task #{id} was assigned to you!</b>\n\n<b>Title:</b> {title}\n<b>Direction:</b> {dir}\n<b>Deadline:</b> {deadline}",
+        'btn_done': "Mark as Completed",
+        'no_tasks': "No active tasks!",
+        'task_done_msg': "Task completed!",
+        'admin_profile': "<b>ADMIN PANEL</b>\n\n<b>User:</b> {name}\n<b>Position:</b> Head / Leader\n<b>Permissions:</b> Full administrative access.",
+        'worker_profile': "<b>EMPLOYEE PROFILE</b>\n\n<b>User:</b> {name}\n<b>Position:</b> Worker / Executive\n<b>Permissions:</b> View and complete tasks.",
+        'no_access': "You do not have permission to execute this command.",
+        'webapp_error': "Could not process data from the app. Please try again.",
         'status_in_progress': "In progress",
         'status_done': "Done",
-        'admin_granted': "👑 <b>Chief (Admin) rights granted!</b>",
-        'admin_login_disabled': "⛔ Admin login is disabled. Set ADMIN_SECRET in .env.",
-        'admin_login_wrong': "⛔ Wrong admin password.",
+        'admin_granted': "<b>Chief (Admin) rights granted!</b>",
+        'admin_login_disabled': "Admin login is disabled. Set ADMIN_SECRET in .env.",
+        'admin_login_wrong': "Wrong admin password.",
         'flt_priority': "Priority",
         'flt_assignee': "Assignee",
         'flt_all': "All",
-        'flt_pick_assignee': "👤 <b>Choose an assignee:</b>",
+        'flt_pick_assignee': "<b>Choose an assignee:</b>",
         'flt_back': "← Back to the list",
-        'flt_empty': "🔍 No tasks match this filter.",
+        'flt_empty': "No tasks match this filter.",
         'flt_shown': "showing {from}–{to} of {total}"
     }
 }
@@ -255,7 +256,7 @@ def status_label(t: dict, status: str) -> str:
     return status
 
 
-# --- БАЗА ДАННЫХ ПЛАТФОРМЫ (общая с Assambleya OS) ---
+# --- БАЗА ДАННЫХ ПЛАТФОРМЫ (общая с Assembly OS) ---
 # Роли-руководители платформы — им можно выдавать задачи через бота.
 MANAGER_ROLES = {"RAIS", "BOLIM_RAHBARI", "AI_LAB", "UYUSHMA_RAISI", "LOYIHA_RAHBARI"}
 
@@ -516,9 +517,9 @@ class CreateTaskFSM(StatesGroup):
 def lang_inline_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="setlang_uz"),
-            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="setlang_ru"),
-            InlineKeyboardButton(text="🇬🇧 English", callback_data="setlang_en")
+            InlineKeyboardButton(text="O'zbekcha", callback_data="setlang_uz"),
+            InlineKeyboardButton(text="Русский", callback_data="setlang_ru"),
+            InlineKeyboardButton(text="English", callback_data="setlang_en")
         ]
     ])
 
@@ -528,9 +529,8 @@ def assignee_inline_kb(exclude_pid=None):
     rows = []
     for u in get_assignables(exclude_pid):
         name = u['full_name'] or str(u['id'])
-        tag = "👑" if u['role'] in MANAGER_ROLES else "👷"
         dep = f" · {u['department']}" if u['department'] else ""
-        rows.append([InlineKeyboardButton(text=f"{tag} {name}{dep}", callback_data=f"asg_{u['id']}")])
+        rows.append([InlineKeyboardButton(text=f"{name}{dep}", callback_data=f"asg_{u['id']}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -545,8 +545,15 @@ def main_keyboard(lang: str, is_admin: bool):
 
     last_row = []
     if WEBAPP_URL:
-        sep = '&' if '?' in WEBAPP_URL else '?'
-        last_row.append(KeyboardButton(text=t['btn_open_app'], web_app=WebAppInfo(url=f"{WEBAPP_URL}{sep}lang={lang}")))
+        # Ведём на /login, а не на корень. Корень отвечает редиректом, а
+        # Telegram передаёт данные Mini App во фрагменте адреса
+        # (#tgWebAppData=...) — часть клиентов теряет фрагмент при редиректе, и
+        # приложение открывается «пустым». /login сам пропускает уже вошедшего
+        # на /dashboard, так что лишнего шага для человека не появляется.
+        last_row.append(KeyboardButton(
+            text=t['btn_open_app'],
+            web_app=WebAppInfo(url=f"{WEBAPP_URL}/login?lang={lang}"),
+        ))
     last_row.append(KeyboardButton(text=t['btn_change_lang']))
     keyboard.append(last_row)
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -556,16 +563,37 @@ def main_keyboard(lang: str, is_admin: bool):
 
 # --- ПРИВЯЗКА TELEGRAM ↔ УЧЁТКА ПЛАТФОРМЫ ---
 LINK_PROMPT = (
-    "👋 <b>Assambleya OS</b>\n\n"
-    "Чтобы пользоваться ботом, привяжите Telegram к учётной записи платформы:\n"
-    "<code>/link ЛОГИН ПАРОЛЬ</code>\n\n"
-    "Например: <code>/link rais 12345678</code>\n"
-    "Сообщение с паролем бот сразу удаляет."
+    "<b>Assembly OS</b>\n\n"
+    "Откройте приложение кнопкой ниже и войдите один раз — "
+    "дальше Telegram будет узнавать вас сам, и уведомления начнут приходить сюда.\n\n"
+    "Если кнопка не открывается, можно привязать вручную: "
+    "<code>/link ЛОГИН ПАРОЛЬ</code> (сообщение с паролем бот сразу удалит)."
 )
+
+
+def link_keyboard(lang: str = "ru"):
+    """Кнопка «открыть приложение» рядом с приглашением привязаться.
+
+    Раньше здесь была только строчка «наберите /link ЛОГИН ПАРОЛЬ», и её не
+    выполнил ни один из четырнадцати сотрудников — то есть весь канал
+    уведомлений был подключён и не доставлял никому. Приложение привязывает
+    учётную запись само, при первом входе, поэтому дорога внутрь должна быть
+    кнопкой, а не инструкцией.
+    """
+    if not WEBAPP_URL:
+        return None
+    t = MESSAGES.get(lang, MESSAGES["ru"])
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(
+            text=t["btn_open_app"],
+            web_app=WebAppInfo(url=f"{WEBAPP_URL}/login?lang={lang}"),
+        )]],
+        resize_keyboard=True,
+    )
 LINK_USAGE = "Формат: <code>/link ЛОГИН ПАРОЛЬ</code>\nНапример: <code>/link rais 12345678</code>"
-LINK_FAIL = "⛔ Неверный логин или пароль платформы. Ещё раз: <code>/link ЛОГИН ПАРОЛЬ</code>"
-LINK_NOUSER = "⛔ Учётка не найдена или отключена."
-LINK_OK = "✅ Telegram привязан к <b>{name}</b> (@{login}). Готово — пользуйтесь ботом."
+LINK_FAIL = "Неверный логин или пароль платформы. Ещё раз: <code>/link ЛОГИН ПАРОЛЬ</code>"
+LINK_NOUSER = "Учётка не найдена или отключена."
+LINK_OK = "Telegram привязан к <b>{name}</b> (@{login}). Готово — пользуйтесь ботом."
 
 
 async def _verify_platform_login(login: str, password: str) -> bool:
@@ -585,12 +613,52 @@ async def _verify_platform_login(login: str, password: str) -> bool:
 async def cmd_start(message: Message):
     u = get_user(message.from_user.id)
     if not u["linked"]:
-        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        await message.answer(LINK_PROMPT, reply_markup=link_keyboard(), parse_mode="HTML")
         return
     t = MESSAGES[u["lang"]]
     role_text = t['role_admin'] if u['role'] == 'admin' else t['role_worker']
     await message.answer(
         t['welcome'].format(name=esc(u['full_name'] or message.from_user.full_name), role=role_text),
+        reply_markup=main_keyboard(u['lang'], u['role'] == 'admin'), parse_mode="HTML")
+
+
+@router.message(Command("app"))
+async def cmd_app(message: Message):
+    """Свежая кнопка на текущий адрес платформы.
+
+    Адрес временного туннеля меняется при каждом обрыве, а Telegram хранит и
+    кнопку меню, и кнопки в отправленных сообщениях такими, какими они были в
+    момент отправки. Клиент может держать мёртвый адрес часами, и человек
+    видит «Error 1016» на исправной системе.
+
+    Эта команда — выход из положения: бот перезапускается вместе со сменой
+    адреса, поэтому WEBAPP_URL здесь всегда текущий, а кнопка приходит новым
+    сообщением, мимо любого кэша.
+    """
+    if not WEBAPP_URL:
+        await message.answer("Публичный адрес платформы сейчас не поднят.")
+        return
+    u = get_user(message.from_user.id)
+    lang = (u or {}).get("lang", "ru")
+    await message.answer(
+        "Свежая ссылка на платформу. Прежние кнопки могли устареть.",
+        reply_markup=link_keyboard(lang),
+        parse_mode="HTML",
+    )
+
+
+async def _do_link(message: Message, login: str, password: str):
+    """Проверяет пару логин/пароль и привязывает Telegram к учётной записи."""
+    if not await _verify_platform_login(login, password):
+        await message.answer(LINK_FAIL, parse_mode="HTML")
+        return
+    info = link_telegram(message.from_user.id, login)
+    if not info:
+        await message.answer(LINK_NOUSER, parse_mode="HTML")
+        return
+    u = get_user(message.from_user.id)
+    await message.answer(
+        LINK_OK.format(name=esc(info['full_name'] or login), login=esc(login)),
         reply_markup=main_keyboard(u['lang'], u['role'] == 'admin'), parse_mode="HTML")
 
 
@@ -604,18 +672,7 @@ async def cmd_link(message: Message, command: CommandObject):
     if len(parts) < 2:
         await message.answer(LINK_USAGE, parse_mode="HTML")
         return
-    login, password = parts[0].strip(), parts[1].strip()
-    if not await _verify_platform_login(login, password):
-        await message.answer(LINK_FAIL, parse_mode="HTML")
-        return
-    info = link_telegram(message.from_user.id, login)
-    if not info:
-        await message.answer(LINK_NOUSER, parse_mode="HTML")
-        return
-    u = get_user(message.from_user.id)
-    await message.answer(
-        LINK_OK.format(name=esc(info['full_name'] or login), login=esc(login)),
-        reply_markup=main_keyboard(u['lang'], u['role'] == 'admin'), parse_mode="HTML")
+    await _do_link(message, parts[0].strip(), parts[1].strip())
 
 
 @router.callback_query(F.data.startswith("setlang_"))
@@ -637,35 +694,35 @@ async def select_language(callback):
     )
 
 
-@router.message(F.text.in_(["🌐 Сменить язык", "🌐 Tilni o'zgartirish", "🌐 Change Language"]))
+@router.message(F.text.in_(["Сменить язык", "Tilni o'zgartirish", "Change Language"]))
 async def change_lang_btn(message: Message):
     await message.answer(MESSAGES['ru']['choose_lang'], reply_markup=lang_inline_kb(), parse_mode="HTML")
 
 
 # --- ПРОФИЛЬ И АДМИН ПАНЕЛЬ ---
 
-@router.message(F.text.in_(["⚙️ Админ-панель", "⚙️ Admin panel", "💼 Мой профиль / Должность", "💼 Mening lavozimim", "💼 My Position / Profile"]))
+@router.message(F.text.in_(["Админ-панель", "Admin panel", "Мой профиль / Должность", "Mening lavozimim", "My Position / Profile"]))
 async def show_profile(message: Message):
     user_data = get_user(message.from_user.id)
     if not user_data.get('linked'):
-        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        await message.answer(LINK_PROMPT, reply_markup=link_keyboard(), parse_mode="HTML")
         return
     t = MESSAGES[user_data['lang']]
 
     name = esc(user_data['full_name'] or message.from_user.full_name)
     text = t['admin_profile'].format(name=name) if user_data['role'] == 'admin' else t['worker_profile'].format(name=name)
     await message.answer(
-        text + f"\n\n👤 <code>@{esc(user_data['login'])}</code> · {esc(user_data['platform_role'])}",
+        text + f"\n\n<code>@{esc(user_data['login'])}</code> · {esc(user_data['platform_role'])}",
         parse_mode="HTML")
 
 
 # --- СОЗДАНИЕ ЗАДАНИЯ В ЧАТЕ ---
 
-@router.message(F.text.in_(["➕ Дать задание", "➕ Topshiriq berish", "➕ Assign Task"]))
+@router.message(F.text.in_(["Дать задание", "Topshiriq berish", "Assign Task"]))
 async def start_create_task(message: Message, state: FSMContext):
     user_data = get_user(message.from_user.id)
     if not user_data.get('linked'):
-        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        await message.answer(LINK_PROMPT, reply_markup=link_keyboard(), parse_mode="HTML")
         return
     t = MESSAGES[user_data['lang']]
 
@@ -761,7 +818,7 @@ async def process_deadline(message: Message, state: FSMContext):
 
     if not user_data.get('linked'):
         await state.clear()
-        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        await message.answer(LINK_PROMPT, reply_markup=link_keyboard(), parse_mode="HTML")
         return
 
     await state.update_data(deadline=message.text)
@@ -820,7 +877,7 @@ def render_all_tasks(lang, priority, assignee_id, page):
 
     who = get_user_name(assignee_id) if assignee_id else None
     head = (
-        f"📋 <b>{esc(t['btn_all_tasks'])}</b>\n"
+        f"<b>{esc(t['btn_all_tasks'])}</b>\n"
         f"• {esc(t['flt_priority'])}: <b>{esc(_prio_label(lang, priority) if priority else t['flt_all'])}</b>\n"
         f"• {esc(t['flt_assignee'])}: <b>{esc(who or t['flt_all'])}</b>\n"
     )
@@ -836,7 +893,7 @@ def render_all_tasks(lang, priority, assignee_id, page):
     ) + "\n\n"
 
     body = "".join(
-        f"🔹 <b>{esc(row['code'])} {esc(row['title'])}</b>\n"
+        f"<b>{esc(row['code'])} {esc(row['title'])}</b>\n"
         f"• {esc(row['direction_code'] or '—')} | → {esc(row['assignee_name'])}\n"
         f"• <code>{esc(row['deadline'] or '—')}</code> | "
         f"{esc(_prio_label(lang, row['priority']))} | "
@@ -871,7 +928,7 @@ def filters_keyboard(lang, priority, assignee_id, page, pages):
 
     who = get_user_name(assignee_id) if assignee_id else None
     rows.append([InlineKeyboardButton(
-        text=f"👤 {t['flt_assignee']}: {who or t['flt_all']}",
+        text=f"{t['flt_assignee']}: {who or t['flt_all']}",
         callback_data=f"ap:{prio_code}:{uid}:0",
     )])
 
@@ -938,11 +995,11 @@ async def _safe_edit(message, text, keyboard):
             raise
 
 
-@router.message(F.text.in_(["📊 Все поручения", "📊 Barcha topshiriqlar", "📊 All Tasks"]))
+@router.message(F.text.in_(["Все поручения", "Barcha topshiriqlar", "All Tasks"]))
 async def show_all_tasks(message: Message):
     user_data = get_user(message.from_user.id)
     if not user_data.get('linked'):
-        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        await message.answer(LINK_PROMPT, reply_markup=link_keyboard(), parse_mode="HTML")
         return
     t = MESSAGES[user_data['lang']]
 
@@ -987,11 +1044,11 @@ async def pick_assignee(callback):
     await callback.answer()
 
 
-@router.message(F.text.in_(["📋 Мои задания", "📋 Mening topshiriqlarim", "📋 My Tasks"]))
+@router.message(F.text.in_(["Мои задания", "Mening topshiriqlarim", "My Tasks"]))
 async def show_my_tasks(message: Message):
     user_data = get_user(message.from_user.id)
     if not user_data.get('linked'):
-        await message.answer(LINK_PROMPT, parse_mode="HTML")
+        await message.answer(LINK_PROMPT, reply_markup=link_keyboard(), parse_mode="HTML")
         return
     t = MESSAGES[user_data['lang']]
 
@@ -1008,10 +1065,10 @@ async def show_my_tasks(message: Message):
             [InlineKeyboardButton(text=t['btn_done'], callback_data=f"done_{row['id']}")]
         ])
         await message.answer(
-            f"📌 <b>{esc(row['code'])}: {esc(row['title'])}</b>\n"
-            f"🏛 {esc(row['direction_code'] or '—')}"
+            f"<b>{esc(row['code'])}: {esc(row['title'])}</b>\n"
+            f"{esc(row['direction_code'] or '—')}"
             + (f"  →  {esc(row['assignee_name'])}" if is_admin else "") + "\n"
-            f"⏰ <code>{esc(row['deadline'] or '—')}</code> | "
+            f"<code>{esc(row['deadline'] or '—')}</code> |"
             f"Status: <code>{esc(row['status'])}</code>",
             reply_markup=kb,
             parse_mode="HTML"
@@ -1045,7 +1102,7 @@ async def mark_done(callback):
     await callback.answer(t['task_done_msg'])
     base = esc(callback.message.text or "")
     await callback.message.edit_text(
-        f"{base}\n\n📤 <b>→ TEKSHIRUVDA (на проверке у автора)</b>", parse_mode="HTML")
+        f"{base}\n\n<b>→ TEKSHIRUVDA (на проверке у автора)</b>", parse_mode="HTML")
 
     # Уведомим автора задачи, если он привязал Telegram.
     try:
@@ -1054,7 +1111,7 @@ async def mark_done(callback):
         atg = get_telegram_id(author['from_user_id']) if author else None
         if atg:
             await bot.send_message(
-                atg, f"📤 <b>{esc(row['code'])}</b>: {esc(row['title'])} — сдано на проверку.",
+                atg, f"<b>{esc(row['code'])}</b>: {esc(row['title'])} — сдано на проверку.",
                 parse_mode="HTML")
     except Exception as e:
         logging.info("Не удалось уведомить автора: %s", e)
@@ -1242,7 +1299,7 @@ def _digest_text(lang: str) -> str:
     if not rows and not ideas:
         return ""
 
-    parts = [f"🗒 <b>{title}</b>"]
+    parts = [f"<b>{title}</b>"]
     for meeting_title, created_at, summary, key_points, decisions in rows:
         day = (created_at or "")[:10]
         parts.append(f"\n<b>{meeting_title}</b> · {day}")
@@ -1257,7 +1314,7 @@ def _digest_text(lang: str) -> str:
                 lines = "\n".join(f"• {item}" for item in items)
                 parts.append(f"<i>{label}:</i>\n{lines}")
     if ideas:
-        parts.append(f"\n💡 <b>{IDEAS_LABELS[code]}</b>")
+        parts.append(f"\n<b>{IDEAS_LABELS[code]}</b>")
         for partner, proposal, why, match in ideas:
             if not proposal:
                 continue
@@ -1382,12 +1439,191 @@ async def cmd_report_now(message: Message):
 # --- ЗАПУСК ---
 
 
+VOICE_WAIT = "Принял запись. Распознаю и разбираю — это может занять минуту."
+VOICE_NOLINK = "Сначала привяжите аккаунт: пришлите <code>ЛОГИН ПАРОЛЬ</code> одним сообщением."
+VOICE_FAIL = {
+    "NOT_LINKED": "Аккаунт не привязан к платформе.",
+    "FORBIDDEN": "У вашей роли нет доступа к разбору совещаний.",
+    "TRANSCRIPT_TOO_SHORT": "Слишком короткая запись — распознавать нечего.",
+    "EMPTY": "В записи не разобрано ни слова. Проверьте, что говорили в микрофон.",
+    "STT_UNAVAILABLE": "Распознавание речи на сервере сейчас недоступно.",
+    "TOO_LONG": "Запись слишком длинная.",
+    "BAD_AUDIO": "Не удалось прочитать аудио.",
+    "FAILED": "Распознавание не удалось.",
+}
+
+
+# Предел Telegram на скачивание ботом. Часовая запись его превысит, и это
+# надо сказать прямо, а не молча уронить разбор.
+TG_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+
+# Диктофон на телефоне отдаёт запись файлом, и Telegram присылает её как
+# документ, а не как аудио. Ловим по типу и по расширению: iPhone шлёт m4a,
+# Android — чаще m4a или mp3, а тип иногда приходит пустым.
+AUDIO_EXT = (".m4a", ".mp3", ".ogg", ".oga", ".wav", ".aac", ".opus",
+             ".webm", ".amr", ".flac", ".mp4", ".caf", ".aiff", ".aif")
+
+
+def _audio_document(message: Message):
+    """Документ, который на деле является записью. Иначе None."""
+    doc = message.document
+    if not doc:
+        return None
+    mime = (doc.mime_type or "").lower()
+    name = (doc.file_name or "").lower()
+    if mime.startswith("audio/") or mime.startswith("video/"):
+        return doc
+    if name.endswith(AUDIO_EXT):
+        return doc
+    return None
+
+
+@router.message(F.voice | F.audio | F.video_note | F.document)
+async def on_voice(message: Message):
+    """Голосовое сообщение как запись совещания.
+
+    Telegram не всегда отдаёт микрофон мини-приложению — на iPhone не отдаёт
+    вовсе. Но записывать голосовые он умеет всегда и своими средствами, так
+    что самый надёжный способ занести совещание с телефона — прислать его
+    сюда. Дальше всё то же, что при загрузке с сайта: распознавание,
+    выводы, черновики поручений руководителю на проверку.
+    """
+    u = get_user(message.from_user.id)
+    if not u:
+        await message.answer(VOICE_NOLINK, reply_markup=link_keyboard(), parse_mode="HTML")
+        return
+
+    media = message.voice or message.audio or message.video_note or _audio_document(message)
+    if not media:
+        await message.answer(
+            "Пришлите запись: голосовое сообщение или файл с диктофона "
+            "(m4a, mp3, ogg, wav). Другие файлы бот не разбирает — "
+            "документы загружаются на самой платформе."
+        )
+        return
+
+    if (media.file_size or 0) > TG_DOWNLOAD_LIMIT:
+        mb = round((media.file_size or 0) / 1024 / 1024)
+        await message.answer(
+            f"Запись {mb} МБ — Telegram не даёт боту скачивать файлы больше 20 МБ.\n"
+            "Загрузите её на платформе: раздел «Совещания» → новая запись. "
+            "Там предел 200 МБ."
+        )
+        return
+
+    file = await message.bot.get_file(media.file_id)
+    buf = io.BytesIO()
+    await message.bot.download_file(file.file_path, buf)
+    buf.seek(0)
+
+    note = await message.answer(VOICE_WAIT, parse_mode="HTML")
+
+    # Подпись к голосовому становится названием совещания — это единственное
+    # место, где человек может его назвать, не выходя из чата.
+    title = (message.caption or "").strip()[:160] or "Ovozli xabar"
+
+    data = aiohttp.FormData()
+    data.add_field("telegram_id", str(message.from_user.id))
+    data.add_field("title", title)
+    data.add_field("lang", "auto")
+    data.add_field("audio", buf.read(),
+                   filename=(getattr(media, "file_name", None) or "voice.ogg"),
+                   content_type=(getattr(media, "mime_type", None) or "audio/ogg"))
+
+    url = f"{PLATFORM_API}/api/ai/meeting/telegram"
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(url, data=data,
+                                 headers={"X-Notify-Secret": NOTIFY_SECRET},
+                                 timeout=aiohttp.ClientTimeout(total=1800)) as r:
+                payload = await r.json(content_type=None)
+                status = r.status
+    except Exception as e:
+        logging.warning("Разбор голосового не удался (%s): %s", url, e)
+        await note.edit_text("Платформа не отвечает. Попробуйте ещё раз.")
+        return
+
+    if status != 200:
+        code = (payload or {}).get("error", "")
+        await note.edit_text(VOICE_FAIL.get(code, f"Не удалось разобрать запись ({code or status})."))
+        return
+
+    lines = [f"<b>{esc(title)}</b>"]
+    summary = (payload.get("summary") or "").strip()
+    if summary:
+        lines.append("")
+        lines.append(esc(summary))
+    points = payload.get("keyPoints") or []
+    if points:
+        lines.append("")
+        lines.append("<b>Ключевые пункты</b>")
+        for point in points[:8]:
+            lines.append(f"• {esc(str(point))}")
+
+    created = payload.get("created") or 0
+    drafts = payload.get("drafts") or 0
+    if created or drafts:
+        lines.append("")
+        if drafts:
+            lines.append(f"Черновиков поручений: {drafts} — ушли руководителю на проверку.")
+        if created:
+            lines.append(f"Поручений создано: {created}.")
+
+    await note.edit_text("\n".join(lines)[:4000], parse_mode="HTML")
+
+
+@router.message(F.text)
+async def fallback(message: Message):
+    """Последний обработчик: всё, что не подошло остальным.
+
+    Здесь две задачи, и обе выросли из наблюдения за живой перепиской.
+
+    Первая — пароли. Подсказка показывает «/link rais 12345678», и человек
+    естественно набирает «rais 12345678» без команды. Раньше такое сообщение
+    не подходило ни одному обработчику: бот молчал, а пароль оставался
+    висеть в переписке навсегда. Теперь пара «слово слово» принимается как
+    попытка привязки и сообщение удаляется первым же действием — до всякой
+    проверки, потому что удалять надо и неверный пароль тоже.
+
+    Вторая — молчание. Бот, не отвечающий ни на что незнакомое, выглядит
+    сломанным. Лучше короткая подсказка, чем тишина.
+    """
+    text = (message.text or "").strip()
+    parts = text.split()
+
+    # Похоже на «логин пароль»: два слова, без пробелов внутри, не команда.
+    if len(parts) == 2 and not text.startswith("/") and len(parts[1]) >= 6:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await _do_link(message, parts[0], parts[1])
+        return
+
+    u = get_user(message.from_user.id)
+    if not u:
+        await message.answer(LINK_PROMPT, reply_markup=link_keyboard(), parse_mode="HTML")
+        return
+    t = MESSAGES[u['lang']]
+    await message.answer(
+        "Не понял команду. Пользуйтесь кнопками ниже или /start.",
+        reply_markup=main_keyboard(u['lang'], u['role'] == 'admin'),
+    )
+
+
 async def main():
     init_db()
 
     if WEBAPP_URL:
         await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(text=MENU_BUTTON_TEXT, web_app=WebAppInfo(url=WEBAPP_URL))
+            # На /login, а не на корень: корень отвечает редиректом, а Telegram
+            # передаёт данные Mini App во фрагменте адреса (#tgWebAppData=...),
+            # который часть клиентов при редиректе теряет. Уже вошедшего
+            # /login сам пропускает дальше, так что лишнего шага нет.
+            menu_button=MenuButtonWebApp(
+                text=MENU_BUTTON_TEXT,
+                web_app=WebAppInfo(url=f"{WEBAPP_URL}/login"),
+            )
         )
     else:
         await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
