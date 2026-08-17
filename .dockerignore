@@ -1,0 +1,12 @@
+.git
+.github
+__pycache__
+*.pyc
+.venv
+venv
+.env
+.env.*
+webapp
+start.ps1
+HOWTO.md
+INTEGRATION.md

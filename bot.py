@@ -43,6 +43,7 @@ except ImportError:
 # ОДНИМИ пользователями и задачами. По умолчанию — ../data/assambleya.db.
 _DEFAULT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "assambleya.db")
 DB_PATH = os.getenv("PLATFORM_DB", _DEFAULT_DB)
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 
 # Токен бота из BotFather. ХРАНИТЕ его в .env, НЕ в коде!
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -103,6 +104,12 @@ logging.basicConfig(level=logging.INFO)
 
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан. Укажите его в .env или в переменных окружения.")
+
+if APP_ENV == "production" and len(NOTIFY_SECRET) < 32:
+    raise SystemExit("BOT_NOTIFY_SECRET должен содержать не менее 32 символов в production.")
+
+if APP_ENV == "production" and not PLATFORM_URL.startswith("https://"):
+    raise SystemExit("PLATFORM_URL должен быть публичным HTTPS-адресом в production.")
 
 if WEBAPP_URL and not WEBAPP_URL.startswith("https://"):
     logging.warning("WEBAPP_URL должен начинаться с https:// — кнопка приложения отключена")
@@ -264,6 +271,8 @@ MANAGER_ROLES = {"RAIS", "BOLIM_RAHBARI", "AI_LAB", "UYUSHMA_RAISI", "LOYIHA_RAH
 def db_conn():
     """Единая точка доступа к общей БД. WAL допускает параллельную работу с
     Next.js-платформой; busy_timeout ждёт, если писатель занят."""
+    if not os.path.isfile(DB_PATH):
+        raise RuntimeError("backend schema is not initialized")
     conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
@@ -276,11 +285,16 @@ def db_conn():
 
 
 def init_db():
-    """Таблицы создаёт сама платформа; боту нужен лишь столбец связи."""
+    """Verify backend-owned schema readiness; the bot never runs DDL."""
     with db_conn() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
         if "telegram_id" not in cols:
-            conn.execute("ALTER TABLE users ADD COLUMN telegram_id INTEGER")
+            raise RuntimeError("backend schema is not ready: users.telegram_id is missing")
+        report_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_reports'"
+        ).fetchone()
+        if not report_table:
+            raise RuntimeError("backend schema is not ready: bot_reports is missing")
 
 
 def _now():
@@ -1095,7 +1109,14 @@ async def wa_notify(request):
 
 
 async def wa_health(request):
-    return web.json_response({"ok": True, "db": DB_PATH})
+    try:
+        with db_conn() as conn:
+            row = conn.execute("SELECT 1").fetchone()
+        if not row or row[0] != 1:
+            raise RuntimeError("database readiness check failed")
+        return web.json_response({"ok": True})
+    except Exception:
+        return web.json_response({"ok": False}, status=503)
 
 
 def build_web_app() -> web.Application:
@@ -1124,9 +1145,6 @@ def _report_marker(when: datetime) -> str:
 
 def _report_already_sent(marker: str) -> bool:
     with db_conn() as conn:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS bot_reports (marker TEXT PRIMARY KEY, sent_at TEXT)"
-        )
         row = conn.execute(
             "SELECT marker FROM bot_reports WHERE marker = ?", (marker,)
         ).fetchone()
